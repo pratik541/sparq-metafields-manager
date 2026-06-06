@@ -1,4 +1,5 @@
 import os
+import json
 import streamlit as st
 import requests
 import pandas as pd
@@ -254,11 +255,16 @@ TEMPLATE_COLS = [
 # ─────────────────────────────────────────────────────────
 def get_access_token(store_url, client_id, client_secret):
     url = f"https://{store_url}/admin/oauth/access_token"
-    resp = requests.post(url, json={
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-    })
+    try:
+        resp = requests.post(url, json={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }, timeout=15)
+    except requests.exceptions.Timeout:
+        return None, "Connection timed out. Check your Store URL and network."
+    except requests.exceptions.ConnectionError:
+        return None, "Cannot reach the store. Check your Store URL."
     if resp.status_code == 200:
         return resp.json()["access_token"], None
     return None, f"Auth failed {resp.status_code}: {resp.text}"
@@ -268,7 +274,7 @@ def fetch_all_products(headers, store_url):
     products = []
     url = f"https://{store_url}/admin/api/2025-01/products.json?limit=250"
     while url:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             break
         products.extend(resp.json().get("products", []))
@@ -284,7 +290,7 @@ def fetch_all_products(headers, store_url):
 
 def fetch_metafields(headers, store_url, product_id):
     url  = f"https://{store_url}/admin/api/2025-01/products/{product_id}/metafields.json"
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=15)
     if resp.status_code == 200:
         return resp.json().get("metafields", [])
     return []
@@ -333,7 +339,7 @@ def create_product(headers, store_url, row, all_rows):
         "published": True,
     }}
 
-    resp = requests.post(f"https://{store_url}/admin/api/2025-01/products.json", headers=headers, json=data)
+    resp = requests.post(f"https://{store_url}/admin/api/2025-01/products.json", headers=headers, json=data, timeout=15)
     if resp.status_code == 201:
         return resp.json()["product"]["id"], None
     return None, resp.text[:200]
@@ -357,7 +363,7 @@ def set_metafields_for_product(headers, store_url, product_id, row, meta_cols):
             elif mf_type == "boolean":        value = "true" if value.lower() in ("true","1","yes") else "false"
         except:
             mf_type = "single_line_text_field"
-        resp = requests.post(url, headers=headers, json={"metafield": {"namespace":ns,"key":key,"value":value,"type":mf_type}})
+        resp = requests.post(url, headers=headers, json={"metafield": {"namespace":ns,"key":key,"value":value,"type":mf_type}}, timeout=15)
         if resp.status_code == 201:
             logs.append(f"✅ {ns}.{key} = {value}")
             ok += 1
@@ -529,7 +535,16 @@ st.markdown("""
 products = []
 if st.session_state.connected:
     with st.spinner("Loading store stats..."):
-        products = fetch_all_products(st.session_state.headers, st.session_state.store_url)
+        try:
+            products = fetch_all_products(st.session_state.headers, st.session_state.store_url)
+        except requests.exceptions.Timeout:
+            st.warning("⚠️ Store connection timed out. Check your network and try reconnecting.")
+            st.session_state.connected = False
+            st.session_state.token = None
+        except requests.exceptions.ConnectionError:
+            st.warning("⚠️ Cannot reach the store. Check your Store URL.")
+            st.session_state.connected = False
+            st.session_state.token = None
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -956,7 +971,7 @@ with tab4:
 
                 # Check if metafield already exists
                 mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/products/{product_id}/metafields.json"
-                mf_resp   = requests.get(mf_url, headers=st.session_state.headers)
+                mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=15)
                 existing_id = None
                 if mf_resp.status_code == 200:
                     for mf in mf_resp.json().get("metafields",[]):
@@ -964,16 +979,41 @@ with tab4:
                             existing_id = mf["id"]
                             break
 
+                # Coerce value to correct string format for the given type
+                raw = str(value).strip().lstrip("'")
+                try:
+                    if mf_type == "number_integer":
+                        raw = str(int(float(raw)))
+                    elif mf_type == "number_decimal":
+                        raw = str(float(raw))
+                    elif mf_type == "boolean":
+                        raw = "true" if raw.lower() in ("true", "1", "yes") else "false"
+                    elif mf_type == "rich_text_field":
+                        # Only skip wrapping if value is already a Shopify rich text JSON object
+                        try:
+                            parsed = json.loads(raw)
+                            already_rich = isinstance(parsed, dict) and parsed.get("type") == "root"
+                        except (json.JSONDecodeError, ValueError):
+                            already_rich = False
+                        if not already_rich:
+                            plain = re.sub(r"<[^>]+>", "", raw).strip()
+                            raw = json.dumps({
+                                "type": "root",
+                                "children": [{"type": "paragraph", "children": [{"type": "text", "value": plain}]}]
+                            })
+                except (ValueError, TypeError):
+                    pass
+
                 payload = {"metafield": {
                     "namespace": namespace, "key": key,
-                    "value": str(value), "type": mf_type
+                    "value": raw, "type": mf_type
                 }}
 
                 if existing_id:
                     # UPDATE
                     resp = requests.put(
                         f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
-                        headers=st.session_state.headers, json=payload
+                        headers=st.session_state.headers, json=payload, timeout=15
                     )
                     if resp.status_code == 200:
                         ulog(f"  🔄 UPDATED → {namespace}.{key} = {str(value)[:40]}")
@@ -983,7 +1023,7 @@ with tab4:
                         failed += 1
                 else:
                     # CREATE
-                    resp = requests.post(mf_url, headers=st.session_state.headers, json=payload)
+                    resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=15)
                     if resp.status_code == 201:
                         ulog(f"  ✨ CREATED → {namespace}.{key} = {str(value)[:40]}")
                         ucreated += 1
