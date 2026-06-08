@@ -1,25 +1,19 @@
-import os
 import requests
 import pandas as pd
+import json
 import time
-from pathlib import Path
 
-_env_file = Path(__file__).parent / "config" / ".env"
-if _env_file.exists():
-    for _line in _env_file.read_text().splitlines():
-        if _line.strip() and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
-
-STORE_URL     = os.environ["SHOPIFY_STORE_URL"]
-CLIENT_ID     = os.environ["SHOPIFY_CLIENT_ID"]
-CLIENT_SECRET = os.environ["SHOPIFY_CLIENT_SECRET"]
+# ── Your Credentials ──────────────────────────────────────
+STORE_URL     = "sparq-diamonds-dev.myshopify.com"
+CLIENT_ID     = "your-client-id"
+CLIENT_SECRET = "your-client-secret"
+# ──────────────────────────────────────────────────────────
 
 CSV_FILE = "Metafiled_Update.csv"
 
 
 # ─────────────────────────────────────────────────────────
-# STEP 1 — GET ACCESS TOKEN
+# AUTH
 # ─────────────────────────────────────────────────────────
 def get_access_token():
     url  = f"https://{STORE_URL}/admin/oauth/access_token"
@@ -36,22 +30,19 @@ def get_access_token():
 
 
 # ─────────────────────────────────────────────────────────
-# STEP 2 — FETCH ALL PRODUCTS (cached once)
+# FETCH ALL PRODUCTS + VARIANTS (cached once)
 # ─────────────────────────────────────────────────────────
 def fetch_all_products(headers):
     products = []
     url      = f"https://{STORE_URL}/admin/api/2025-01/products.json?limit=250"
-
-    print("📦 Fetching products from store", end="", flush=True)
+    print("📦 Fetching products", end="", flush=True)
     while url:
         resp = requests.get(url, headers=headers)
         if resp.status_code != 200:
-            print(f"\n❌ Error: {resp.status_code} {resp.text}")
+            print(f"\n❌ {resp.status_code}: {resp.text}")
             break
         products.extend(resp.json().get("products", []))
         print(".", end="", flush=True)
-
-        # Pagination
         link = resp.headers.get("Link", "")
         url  = None
         if 'rel="next"' in link:
@@ -59,42 +50,162 @@ def fetch_all_products(headers):
                 if 'rel="next"' in part:
                     url = part.strip().split(";")[0].strip("<> ")
         time.sleep(0.3)
-
     print(f"\n✅ {len(products)} products loaded\n")
     return products
 
 
 # ─────────────────────────────────────────────────────────
-# STEP 3 — FIND PRODUCT by Handle → SKU fallback
+# FIND HELPERS
 # ─────────────────────────────────────────────────────────
-def find_product(products_cache, handle, sku):
-    """
-    Match priority:
-      1. Handle (exact match) — fastest
-      2. Variant SKU (fallback) — if handle not found
-    """
-    # Try Handle first
-    if handle:
-        for p in products_cache:
-            if p.get("handle", "").strip() == handle.strip():
-                return p["id"], p.get("title", "")
+def find_variant_by_sku(products_cache, sku):
+    """Returns (product_id, variant_id, title) matched by SKU."""
+    for product in products_cache:
+        for variant in product.get("variants", []):
+            if str(variant.get("sku", "")).strip() == sku.strip():
+                return product["id"], variant["id"], product.get("title", "")
+    return None, None, None
 
-    # Fallback to SKU
-    if sku:
-        for p in products_cache:
-            for v in p.get("variants", []):
-                if str(v.get("sku", "")).strip() == sku.strip():
-                    return p["id"], p.get("title", "")
 
+def find_product_by_handle(products_cache, handle):
+    """Returns (product_id, title) matched by handle."""
+    for product in products_cache:
+        if product.get("handle", "").strip() == handle.strip():
+            return product["id"], product.get("title", "")
     return None, None
 
 
 # ─────────────────────────────────────────────────────────
-# STEP 4 — CHECK IF METAFIELD ALREADY EXISTS
+# VALUE FORMATTER
+# Converts plain CSV value → correct format for any type
 # ─────────────────────────────────────────────────────────
-def get_existing_metafield_id(headers, product_id, namespace, key):
-    """Returns metafield ID if it exists, else None."""
-    url  = f"https://{STORE_URL}/admin/api/2025-01/products/{product_id}/metafields.json"
+def format_value(value, mf_type):
+    """
+    Handles ALL Shopify metafield types automatically.
+    Reads raw value from CSV and returns correctly formatted string.
+    """
+    raw = str(value).strip()
+
+    # ── Text types (plain string) ──────────────────────
+    if mf_type in (
+        "single_line_text_field",
+        "multi_line_text_field",
+        "url",
+        "color",
+        "date",
+        "date_time",
+    ):
+        return raw
+
+    # ── Number types ──────────────────────────────────
+    if mf_type == "number_integer":
+        try:    return str(int(float(raw)))
+        except: return raw
+
+    if mf_type == "number_decimal":
+        try:    return str(float(raw))
+        except: return raw
+
+    # ── Boolean ───────────────────────────────────────
+    if mf_type == "boolean":
+        return "true" if raw.lower() in ("true", "1", "yes") else "false"
+
+    # ── rich_text_field ───────────────────────────────
+    # Requires Shopify's JSON structure — auto-wrap plain text
+    if mf_type == "rich_text_field":
+        # Already valid Shopify JSON? return as-is
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("type") == "root":
+                return raw
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Convert plain text → rich_text JSON
+        return json.dumps({
+            "type": "root",
+            "children": [{
+                "type": "paragraph",
+                "children": [{"type": "text", "value": raw}]
+            }]
+        })
+
+    # ── JSON type (any raw JSON) ───────────────────────
+    if mf_type == "json":
+        try:
+            json.loads(raw)   # validate it's valid JSON
+            return raw
+        except json.JSONDecodeError:
+            # Wrap as JSON string if not valid JSON
+            return json.dumps(raw)
+
+    # ── List types (e.g. list.single_line_text_field) ─
+    if mf_type.startswith("list."):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return raw        # already a JSON array
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Comma-separated → JSON array
+        items = [item.strip() for item in raw.split(",")]
+        return json.dumps(items)
+
+    # ── Measurement types (weight, volume, dimension) ─
+    # Expected CSV value: "100 kg" or "100" (unit assumed)
+    if mf_type in ("weight", "volume", "dimension"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return raw        # already {"value":...,"unit":...}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        parts = raw.split()
+        unit_map = {
+            "weight":    "kg",
+            "volume":    "ml",
+            "dimension": "cm",
+        }
+        return json.dumps({
+            "value": float(parts[0]),
+            "unit":  parts[1] if len(parts) > 1 else unit_map[mf_type]
+        })
+
+    # ── Rating ────────────────────────────────────────
+    # Expected CSV value: "4.5" or JSON {"value":4.5,"scale_min":1,"scale_max":5}
+    if mf_type == "rating":
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return raw
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return json.dumps({"value": float(raw), "scale_min": 1, "scale_max": 5})
+
+    # ── Money ─────────────────────────────────────────
+    # Expected CSV value: "999.00" or JSON {"amount":"999.00","currency_code":"INR"}
+    if mf_type == "money":
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return raw
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return json.dumps({"amount": raw, "currency_code": "INR"})
+
+    # ── Reference types (product_reference etc.) ──────
+    # Expected: GID like "gid://shopify/Product/123456"
+    if "reference" in mf_type:
+        return raw
+
+    # ── Fallback: return as plain string ──────────────
+    return raw
+
+
+# ─────────────────────────────────────────────────────────
+# GET EXISTING METAFIELD ID
+# ─────────────────────────────────────────────────────────
+def get_existing_metafield_id(headers, owner_type, owner_id, namespace, key):
+    url  = f"https://{STORE_URL}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
     resp = requests.get(url, headers=headers)
     if resp.status_code == 200:
         for mf in resp.json().get("metafields", []):
@@ -104,73 +215,34 @@ def get_existing_metafield_id(headers, product_id, namespace, key):
 
 
 # ─────────────────────────────────────────────────────────
-# STEP 4b — FORMAT VALUE FOR METAFIELD TYPE
+# UPSERT METAFIELD — PUT if exists, POST if new
 # ─────────────────────────────────────────────────────────
-def format_value(mf_type, value):
-    """Convert plain text/HTML to the format Shopify expects per type."""
-    import json, re
-
-    text = str(value).strip()
-
-    if mf_type == "rich_text_field":
-        # Strip HTML tags to get plain text, then wrap in Shopify rich text JSON
-        plain = re.sub(r"<[^>]+>", "", text).strip()
-        rich  = {
-            "type": "root",
-            "children": [
-                {
-                    "type": "paragraph",
-                    "children": [{"type": "text", "value": plain}]
-                }
-            ]
-        }
-        return json.dumps(rich)
-
-    if mf_type in ("number_integer",):
-        return str(int(float(text)))
-
-    if mf_type in ("number_decimal",):
-        return str(float(text))
-
-    if mf_type == "boolean":
-        return "true" if text.lower() in ("true", "1", "yes") else "false"
-
-    return text   # single_line_text_field, multi_line_text_field, etc.
-
-
-# ─────────────────────────────────────────────────────────
-# STEP 5 — CREATE OR UPDATE METAFIELD
-# ─────────────────────────────────────────────────────────
-def upsert_metafield(headers, product_id, namespace, key, mf_type, value):
-    """
-    Checks if metafield exists:
-      → EXISTS : PUT  to update
-      → MISSING: POST to create
-    """
-    existing_id = get_existing_metafield_id(headers, product_id, namespace, key)
+def upsert_metafield(headers, owner_type, owner_id, namespace, key, mf_type, raw_value):
+    formatted_value = format_value(raw_value, mf_type)
+    existing_id     = get_existing_metafield_id(
+        headers, owner_type, owner_id, namespace, key
+    )
 
     payload = {
         "metafield": {
             "namespace": namespace,
             "key":       key,
-            "value":     format_value(mf_type, value),
+            "value":     formatted_value,
             "type":      mf_type,
         }
     }
 
     if existing_id:
-        # UPDATE
         url  = f"https://{STORE_URL}/admin/api/2025-01/metafields/{existing_id}.json"
         resp = requests.put(url, headers=headers, json=payload)
         if resp.status_code == 200:
-            return "updated", None
+            return "updated", formatted_value
         return "failed", resp.text[:200]
     else:
-        # CREATE
-        url  = f"https://{STORE_URL}/admin/api/2025-01/products/{product_id}/metafields.json"
+        url  = f"https://{STORE_URL}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
         resp = requests.post(url, headers=headers, json=payload)
         if resp.status_code == 201:
-            return "created", None
+            return "created", formatted_value
         return "failed", resp.text[:200]
 
 
@@ -195,24 +267,29 @@ def run_update():
     # Load CSV
     try:
         df = pd.read_csv(CSV_FILE)
+        df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
         print(f"📄 CSV loaded → {len(df)} rows\n")
     except FileNotFoundError:
         print(f"❌ File not found: {CSV_FILE}")
         return
 
-    # Validate columns
-    required = [
-        "Handle", "Variant SKU",
-        "Metafield namespace", "Metafield Key",
-        "Metafield type", "Metafield Value"
-    ]
-    missing = [c for c in required if c not in df.columns]
+    # Validate required columns
+    required = ["Handle", "Variant SKU", "Metafield namespace",
+                "Metafield Key", "Metafield type", "Metafield Value"]
+    missing  = [c for c in required if c not in df.columns]
     if missing:
         print(f"❌ Missing columns in CSV: {missing}")
         return
-    print(f"✅ All required columns found\n")
+    print(f"✅ Columns OK\n")
 
-    # Cache products once (avoids repeated API calls)
+    # Show what will be updated
+    print("📋 Metafields to process:")
+    summary = df.groupby(["Metafield namespace", "Metafield Key", "Metafield type"]).size()
+    for (ns, key, mf_type), count in summary.items():
+        print(f"   → {ns}.{key} ({mf_type}) — {count} rows")
+    print()
+
+    # Cache all products once
     products_cache = fetch_all_products(headers)
 
     # Counters
@@ -235,54 +312,75 @@ def run_update():
         value     = row.get("Metafield Value", "")
 
         print(f"[{i+1}/{total}] SKU       : {sku}")
-        print(f"        Handle    : {handle[:60]}")
-        print(f"        Metafield : {namespace}.{key} ({mf_type})")
+        print(f"        Handle    : {handle[:55]}")
+        print(f"        Field     : {namespace}.{key} ({mf_type})")
         print(f"        Value     : {str(value)[:60]}")
 
         # Skip empty values
-        if pd.isna(value) or str(value).strip() == "":
-            print(f"  ⏭️  SKIPPED — value is empty\n")
+        if pd.isna(value) or str(value).strip() in ("", "nan"):
+            print(f"  ⏭️  SKIPPED — empty value\n")
             skipped += 1
             continue
 
-        # Find product
-        product_id, title = find_product(products_cache, handle, sku)
+        # ── FIND OWNER ───────────────────────────────────
+        # SKU present  → variant level
+        # Handle only  → product level
+        # ─────────────────────────────────────────────────
+        owner_type = None
+        owner_id   = None
+        title      = ""
 
-        if not product_id:
+        sku_clean    = sku.lower() not in ("nan", "none", "")
+        handle_clean = handle.lower() not in ("nan", "none", "")
+
+        if sku_clean:
+            _, variant_id, title = find_variant_by_sku(products_cache, sku)
+            if variant_id:
+                owner_type = "variants"
+                owner_id   = variant_id
+                print(f"  🎯 VARIANT level → {title[:45]}")
+
+        if not owner_id and handle_clean:
+            product_id, title = find_product_by_handle(products_cache, handle)
+            if product_id:
+                owner_type = "products"
+                owner_id   = product_id
+                print(f"  🎯 PRODUCT level → {title[:45]}")
+
+        if not owner_id:
             print(f"  ❌ NOT FOUND — check Handle or SKU\n")
             notfound += 1
             continue
 
-        print(f"  🎯 Product  : {title[:55]} (ID: {product_id})")
-
-        # Create or update metafield
-        action, err = upsert_metafield(
-            headers, product_id, namespace, key, mf_type, value
+        # ── UPSERT ───────────────────────────────────────
+        action, result = upsert_metafield(
+            headers, owner_type, owner_id,
+            namespace, key, mf_type, value
         )
 
         if action == "updated":
-            print(f"  🔄 UPDATED  : {namespace}.{key} = {str(value)[:50]}")
+            print(f"  🔄 UPDATED  → {namespace}.{key}")
             updated += 1
         elif action == "created":
-            print(f"  ✨ CREATED  : {namespace}.{key} = {str(value)[:50]}")
+            print(f"  ✨ CREATED  → {namespace}.{key}")
             created += 1
         else:
-            print(f"  ❌ FAILED   : {err}")
+            print(f"  ❌ FAILED   → {result}")
             failed += 1
 
         print()
-        time.sleep(0.4)   # Avoid Shopify rate limits (40 req/sec)
+        time.sleep(0.4)
 
-    # ── Final Summary ─────────────────────────────────────
+    # Summary
     print("=" * 60)
     print("   UPDATE COMPLETE — SUMMARY")
     print("=" * 60)
-    print(f"  🔄 Updated           : {updated}")
-    print(f"  ✨ Created           : {created}")
-    print(f"  ❌ Failed            : {failed}")
-    print(f"  🔍 Products not found: {notfound}")
-    print(f"  ⏭️  Skipped           : {skipped}")
-    print(f"  📦 Total rows        : {total}")
+    print(f"  🔄 Updated             : {updated}")
+    print(f"  ✨ Created             : {created}")
+    print(f"  ❌ Failed              : {failed}")
+    print(f"  🔍 Not found           : {notfound}")
+    print(f"  ⏭️  Skipped             : {skipped}")
+    print(f"  📦 Total rows          : {total}")
     print("=" * 60)
 
 
