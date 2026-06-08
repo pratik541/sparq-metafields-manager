@@ -28,6 +28,7 @@ METAFIELD_TYPES = {
     ("custom",  "loved_by_customers")  : "number_integer",
     ("custom",  "product_rating")      : "number_decimal",
     ("custom",  "ribbon_text")         : "single_line_text_field",
+    ("custom",  "prod_var_details")    : "rich_text_field",
     ("mm-google-shopping", "custom_product"): "boolean",
     ("shopify", "age-group")           : "single_line_text_field",
     ("shopify", "color-pattern")       : "single_line_text_field",

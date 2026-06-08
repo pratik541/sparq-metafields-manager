@@ -194,6 +194,7 @@ METAFIELD_TYPES = {
     ("custom",             "loved_by_customers"): "number_integer",
     ("custom",             "product_rating")    : "number_decimal",
     ("custom",             "ribbon_text")       : "single_line_text_field",
+    ("custom",             "prod_var_details")  : "rich_text_field",
     ("mm-google-shopping", "custom_product")    : "boolean",
     ("shopify",            "age-group")         : "single_line_text_field",
     ("shopify",            "color-pattern")     : "single_line_text_field",
@@ -208,6 +209,7 @@ METAFIELD_MAP = {
     ("custom",             "loved_by_customers"): "Loved By Customers (product.metafields.custom.loved_by_customers)",
     ("custom",             "product_rating")    : "Product Rating (product.metafields.custom.product_rating)",
     ("custom",             "ribbon_text")       : "Ribbon Text (product.metafields.custom.ribbon_text)",
+    ("custom",             "prod_var_details")  : "Product Variant Details (product.metafields.custom.prod_var_details)",
     ("mm-google-shopping", "custom_product")    : "Google: Custom Product (product.metafields.mm-google-shopping.custom_product)",
     ("shopify",            "age-group")         : "Age group (product.metafields.shopify.age-group)",
     ("shopify",            "color-pattern")     : "Color (product.metafields.shopify.color-pattern)",
@@ -239,6 +241,7 @@ TEMPLATE_COLS = [
     "Loved By Customers (product.metafields.custom.loved_by_customers)",
     "Product Rating (product.metafields.custom.product_rating)",
     "Ribbon Text (product.metafields.custom.ribbon_text)",
+    "Product Variant Details (product.metafields.custom.prod_var_details)",
     "Google: Custom Product (product.metafields.mm-google-shopping.custom_product)",
     "Age group (product.metafields.shopify.age-group)",
     "Color (product.metafields.shopify.color-pattern)",
@@ -862,7 +865,8 @@ with tab4:
     update_file = st.file_uploader("Upload Update CSV", type=["csv"], key="update_file")
 
     if update_file:
-        df_update = pd.read_csv(update_file)
+        df_update = pd.read_csv(update_file, encoding="utf-8-sig")
+        df_update = df_update.loc[:, ~df_update.columns.str.startswith("Unnamed")]
 
         # Validate columns
         required_cols = ["Handle", "Variant SKU", "Metafield namespace",
@@ -943,34 +947,45 @@ with tab4:
                     ulog(f"  ⏭️  Skipped — empty value")
                     continue
 
-                # Find product by handle → SKU fallback
-                product_id = None
-                title      = ""
-                if handle:
-                    for p in products_cache:
-                        if p.get("handle","").strip() == handle:
-                            product_id = p["id"]
-                            title      = p.get("title","")
-                            break
-                if not product_id and sku:
-                    for p in products_cache:
-                        for v in p.get("variants",[]):
-                            if str(v.get("sku","")).strip() == sku:
-                                product_id = p["id"]
-                                title      = p.get("title","")
-                                break
-                        if product_id:
-                            break
+                # SKU present → variant level | SKU empty → product level
+                owner_type  = None
+                owner_id    = None
+                title       = ""
+                sku_clean    = sku.lower() not in ("", "nan", "none")
+                handle_clean = handle.lower() not in ("", "nan", "none")
 
-                if not product_id:
+                if sku_clean:
+                    for p in products_cache:
+                        for v in p.get("variants", []):
+                            if str(v.get("sku", "")).strip() == sku:
+                                owner_type = "variants"
+                                owner_id   = v["id"]
+                                title      = p.get("title", "")
+                                break
+                        if owner_id:
+                            break
+                    if owner_id:
+                        ulog(f"  🔩 VARIANT → {title[:45]}")
+                    else:
+                        ulog(f"  ⚠️ SKU not found, trying handle...")
+
+                if not owner_id and handle_clean:
+                    for p in products_cache:
+                        if p.get("handle", "").strip() == handle:
+                            owner_type = "products"
+                            owner_id   = p["id"]
+                            title      = p.get("title", "")
+                            break
+                    if owner_id:
+                        ulog(f"  📦 PRODUCT → {title[:45]}")
+
+                if not owner_id:
                     ulog(f"  ❌ NOT FOUND — handle: {handle[:40]}")
                     notfound += 1
                     continue
 
-                ulog(f"  ✅ Found: {title[:50]}")
-
-                # Check if metafield already exists
-                mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/products/{product_id}/metafields.json"
+                # Check if metafield already exists on this owner
+                mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
                 mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=15)
                 existing_id = None
                 if mf_resp.status_code == 200:
@@ -1022,7 +1037,7 @@ with tab4:
                         ulog(f"  ❌ Update failed: {resp.text[:80]}")
                         failed += 1
                 else:
-                    # CREATE
+                    # CREATE — mf_url already points to the correct owner (variant or product)
                     resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=15)
                     if resp.status_code == 201:
                         ulog(f"  ✨ CREATED → {namespace}.{key} = {str(value)[:40]}")

@@ -1,13 +1,20 @@
+import os
 import requests
 import pandas as pd
 import json
 import time
+from pathlib import Path
 
-# ── Your Credentials ──────────────────────────────────────
-STORE_URL     = "sparq-diamonds-dev.myshopify.com"
-CLIENT_ID     = "your-client-id"
-CLIENT_SECRET = "your-client-secret"
-# ──────────────────────────────────────────────────────────
+_env_file = Path(__file__).parent / "config" / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        if _line.strip() and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+STORE_URL     = os.environ["SHOPIFY_STORE_URL"]
+CLIENT_ID     = os.environ["SHOPIFY_CLIENT_ID"]
+CLIENT_SECRET = os.environ["SHOPIFY_CLIENT_SECRET"]
 
 CSV_FILE = "Metafiled_Update.csv"
 
@@ -214,6 +221,16 @@ def get_existing_metafield_id(headers, owner_type, owner_id, namespace, key):
     return None
 
 
+def get_existing_metafield(headers, owner_type, owner_id, namespace, key):
+    url  = f"https://{STORE_URL}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        for mf in resp.json().get("metafields", []):
+            if mf["namespace"] == namespace and mf["key"] == key:
+                return mf
+    return None
+
+
 # ─────────────────────────────────────────────────────────
 # UPSERT METAFIELD — PUT if exists, POST if new
 # ─────────────────────────────────────────────────────────
@@ -246,6 +263,18 @@ def upsert_metafield(headers, owner_type, owner_id, namespace, key, mf_type, raw
         return "failed", resp.text[:200]
 
 
+def verify_metafield(headers, owner_type, owner_id, namespace, key, expected_value):
+    mf = get_existing_metafield(headers, owner_type, owner_id, namespace, key)
+    if not mf:
+        return False, "not found after save"
+
+    saved_value = str(mf.get("value", ""))
+    if saved_value == str(expected_value):
+        return True, saved_value
+
+    return False, saved_value[:200]
+
+
 # ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
@@ -266,7 +295,7 @@ def run_update():
 
     # Load CSV
     try:
-        df = pd.read_csv(CSV_FILE)
+        df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
         df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
         print(f"📄 CSV loaded → {len(df)} rows\n")
     except FileNotFoundError:
@@ -304,12 +333,12 @@ def run_update():
     print("-" * 60)
 
     for i, row in df.iterrows():
-        handle    = str(row.get("Handle",             "")).strip()
-        sku       = str(row.get("Variant SKU",        "")).strip()
-        namespace = str(row.get("Metafield namespace","")).strip()
-        key       = str(row.get("Metafield Key",      "")).strip()
-        mf_type   = str(row.get("Metafield type",     "")).strip()
-        value     = row.get("Metafield Value", "")
+        handle          = str(row.get("Handle",             "")).strip()
+        sku             = str(row.get("Variant SKU",        "")).strip()
+        namespace       = str(row.get("Metafield namespace","")).strip()
+        key             = str(row.get("Metafield Key",      "")).strip()
+        mf_type         = str(row.get("Metafield type",     "")).strip()
+        value           = row.get("Metafield Value", "")
 
         print(f"[{i+1}/{total}] SKU       : {sku}")
         print(f"        Handle    : {handle[:55]}")
@@ -322,10 +351,10 @@ def run_update():
             skipped += 1
             continue
 
-        # ── FIND OWNER ───────────────────────────────────
-        # SKU present  → variant level
-        # Handle only  → product level
-        # ─────────────────────────────────────────────────
+        # ── FIND OWNER ────────────────────────────────────
+        # SKU present → variant level (variants/{id})
+        # SKU empty   → product level (products/{id})
+        # ──────────────────────────────────────────────────
         owner_type = None
         owner_id   = None
         title      = ""
@@ -334,18 +363,21 @@ def run_update():
         handle_clean = handle.lower() not in ("nan", "none", "")
 
         if sku_clean:
-            _, variant_id, title = find_variant_by_sku(products_cache, sku)
+            product_id, variant_id, title = find_variant_by_sku(products_cache, sku)
             if variant_id:
                 owner_type = "variants"
                 owner_id   = variant_id
-                print(f"  🎯 VARIANT level → {title[:45]}")
-
-        if not owner_id and handle_clean:
+                print(f"  🔩 VARIANT level → {title[:45]} | variant {variant_id}")
+            elif product_id:
+                owner_type = "products"
+                owner_id   = product_id
+                print(f"  📦 PRODUCT level (SKU matched, no variant) → {title[:45]}")
+        elif handle_clean:
             product_id, title = find_product_by_handle(products_cache, handle)
             if product_id:
                 owner_type = "products"
                 owner_id   = product_id
-                print(f"  🎯 PRODUCT level → {title[:45]}")
+                print(f"  📦 PRODUCT level → {title[:45]}")
 
         if not owner_id:
             print(f"  ❌ NOT FOUND — check Handle or SKU\n")
@@ -367,6 +399,15 @@ def run_update():
         else:
             print(f"  ❌ FAILED   → {result}")
             failed += 1
+
+        if action in ("updated", "created"):
+            ok, saved = verify_metafield(
+                headers, owner_type, owner_id, namespace, key, result
+            )
+            if ok:
+                print("  VERIFIED -> saved value matches Shopify")
+            else:
+                print(f"  WARNING  -> read-back mismatch: {saved}")
 
         print()
         time.sleep(0.4)

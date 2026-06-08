@@ -25,6 +25,7 @@ METAFIELD_MAP = {
     ("custom",            "loved_by_customers"): "Loved By Customers (product.metafields.custom.loved_by_customers)",
     ("custom",            "product_rating")   : "Product Rating (product.metafields.custom.product_rating)",
     ("custom",            "ribbon_text")      : "Ribbon Text (product.metafields.custom.ribbon_text)",
+    ("custom",            "prod_var_details") : "Product Variant Details (product.metafields.custom.prod_var_details)",
     ("mm-google-shopping","custom_product")   : "Google: Custom Product (product.metafields.mm-google-shopping.custom_product)",
     ("shopify",           "age-group")        : "Age group (product.metafields.shopify.age-group)",
     ("shopify",           "color-pattern")    : "Color (product.metafields.shopify.color-pattern)",
