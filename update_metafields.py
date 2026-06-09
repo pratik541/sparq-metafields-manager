@@ -333,15 +333,17 @@ def run_update():
     print("-" * 60)
 
     for i, row in df.iterrows():
-        handle          = str(row.get("Handle",             "")).strip()
-        sku             = str(row.get("Variant SKU",        "")).strip()
-        namespace       = str(row.get("Metafield namespace","")).strip()
-        key             = str(row.get("Metafield Key",      "")).strip()
-        mf_type         = str(row.get("Metafield type",     "")).strip()
-        value           = row.get("Metafield Value", "")
+        handle    = str(row.get("Handle",             "")).strip()
+        sku       = str(row.get("Variant SKU",        "")).strip()
+        namespace = str(row.get("Metafield namespace","")).strip()
+        key       = str(row.get("Metafield Key",      "")).strip()
+        mf_type   = str(row.get("Metafield type",     "")).strip()
+        owner_col = str(row.get("Owner",              "")).strip().lower()
+        value     = row.get("Metafield Value", "")
 
         print(f"[{i+1}/{total}] SKU       : {sku}")
         print(f"        Handle    : {handle[:55]}")
+        print(f"        Owner     : {owner_col or 'auto'}")
         print(f"        Field     : {namespace}.{key} ({mf_type})")
         print(f"        Value     : {str(value)[:60]}")
 
@@ -352,8 +354,10 @@ def run_update():
             continue
 
         # ── FIND OWNER ────────────────────────────────────
-        # SKU present → variant level (variants/{id})
-        # SKU empty   → product level (products/{id})
+        # Owner column controls level explicitly:
+        #   Owner=variant  → variants/{variant_id}
+        #   Owner=product  → products/{product_id}
+        #   Owner missing  → SKU present=variant, else product
         # ──────────────────────────────────────────────────
         owner_type = None
         owner_id   = None
@@ -362,16 +366,22 @@ def run_update():
         sku_clean    = sku.lower() not in ("nan", "none", "")
         handle_clean = handle.lower() not in ("nan", "none", "")
 
+        wants_product = owner_col in ("product", "products")
+
         if sku_clean:
             product_id, variant_id, title = find_variant_by_sku(products_cache, sku)
-            if variant_id:
+            if wants_product and product_id:
+                owner_type = "products"
+                owner_id   = product_id
+                print(f"  📦 PRODUCT level (via SKU) → {title[:45]}")
+            elif variant_id and not wants_product:
                 owner_type = "variants"
                 owner_id   = variant_id
-                print(f"  🔩 VARIANT level → {title[:45]} | variant {variant_id}")
+                print(f"  🔩 VARIANT level → {title[:45]}")
             elif product_id:
                 owner_type = "products"
                 owner_id   = product_id
-                print(f"  📦 PRODUCT level (SKU matched, no variant) → {title[:45]}")
+                print(f"  📦 PRODUCT level (fallback) → {title[:45]}")
         elif handle_clean:
             product_id, title = find_product_by_handle(products_cache, handle)
             if product_id:

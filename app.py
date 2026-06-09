@@ -934,38 +934,55 @@ with tab4:
                 namespace = str(row.get("Metafield namespace","")).strip()
                 key       = str(row.get("Metafield Key","")).strip()
                 mf_type   = str(row.get("Metafield type","")).strip()
+                owner_col = str(row.get("Owner","")).strip().lower()
                 value     = row.get("Metafield Value","")
 
                 update_prog.progress((i + 1) / total)
                 update_status.markdown(f"**Processing [{i+1}/{total}]:** `{sku}`")
 
                 ulog(f"")
-                ulog(f"[{i+1}/{total}] SKU: {sku}")
+                ulog(f"[{i+1}/{total}] SKU: {sku} | Owner: {owner_col or 'auto'}")
 
                 # Skip empty
                 if pd.isna(value) or str(value).strip() == "":
                     ulog(f"  ⏭️  Skipped — empty value")
                     continue
 
-                # SKU present → variant level | SKU empty → product level
-                owner_type  = None
-                owner_id    = None
-                title       = ""
+                # Owner column controls level explicitly:
+                #   Owner=variant  → variants/{variant_id}
+                #   Owner=product  → products/{product_id}
+                #   Owner missing  → SKU present=variant, else product
+                owner_type   = None
+                owner_id     = None
+                title        = ""
                 sku_clean    = sku.lower() not in ("", "nan", "none")
                 handle_clean = handle.lower() not in ("", "nan", "none")
+                wants_product = owner_col in ("product", "products")
 
                 if sku_clean:
+                    product_id_found = None
+                    variant_id_found = None
                     for p in products_cache:
                         for v in p.get("variants", []):
                             if str(v.get("sku", "")).strip() == sku:
-                                owner_type = "variants"
-                                owner_id   = v["id"]
-                                title      = p.get("title", "")
+                                product_id_found = p["id"]
+                                variant_id_found = v["id"]
+                                title = p.get("title", "")
                                 break
-                        if owner_id:
+                        if product_id_found:
                             break
-                    if owner_id:
-                        ulog(f"  🔩 VARIANT → {title[:45]}")
+                    if wants_product and product_id_found:
+                        owner_type = "products"
+                        owner_id   = product_id_found
+                        ulog(f"  📦 PRODUCT level (via SKU) → {title[:45]}")
+                    elif variant_id_found and not wants_product:
+                        owner_type = "variants"
+                        owner_id   = variant_id_found
+                        ulog(f"  🔩 VARIANT level → {title[:45]}")
+                    elif product_id_found:
+                        owner_type = "products"
+                        owner_id   = product_id_found
+                        ulog(f"  📦 PRODUCT level (fallback) → {title[:45]}")
                     else:
                         ulog(f"  ⚠️ SKU not found, trying handle...")
 

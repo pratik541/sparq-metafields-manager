@@ -1,11 +1,11 @@
-﻿Handle,Variant SKU,Metafield namespace,Metafield Key,Metafield type,Metafield Value
-sparq-lab-grown-diamond-009ct-925-sterling-silver-gold-plated-round-shape-earring-6,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-009ct-925-sterling-silver-gold-plated-round-shape-earring-4,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,custom,happy_shoppers,number_integer,5000.0
-sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,custom,loved_by_customers,number_integer,2000.0
-sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,custom,product_rating,number_decimal,4.9
-sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-01ct-925-sterling-silver-gold-plated-round-shape-earring-4,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-036ct-925-sterling-silver-gold-plated-round-shape-earring-6,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-036ct-925-sterling-silver-gold-plated-round-shape-earring-4,,mm-google-shopping,custom_product,boolean,False
-sparq-lab-grown-diamond-03ct-925-sterling-silver-gold-plated-round-shape-earring-8,,mm-google-shopping,custom_product,boolean,False
+﻿Handle,Variant SKU,Owner,Metafield namespace,Metafield Key,Metafield type,Metafield Value
+sparq-lab-grown-diamond-009ct-925-sterling-silver-gold-plated-round-shape-earring-6,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-009ct-925-sterling-silver-gold-plated-round-shape-earring-4,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,,custom,happy_shoppers,number_integer,5000.0
+sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,,custom,loved_by_customers,number_integer,2000.0
+sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,,custom,product_rating,number_decimal,4.9
+sparq-lab-grown-diamond-017ct-925-sterling-silver-gold-plated-round-shape-earring-14,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-01ct-925-sterling-silver-gold-plated-round-shape-earring-4,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-036ct-925-sterling-silver-gold-plated-round-shape-earring-6,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-036ct-925-sterling-silver-gold-plated-round-shape-earring-4,,,mm-google-shopping,custom_product,boolean,False
+sparq-lab-grown-diamond-03ct-925-sterling-silver-gold-plated-round-shape-earring-8,,,mm-google-shopping,custom_product,boolean,False
