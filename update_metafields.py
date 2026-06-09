@@ -33,7 +33,7 @@ def get_access_token():
         print("✅ Access token received")
         return resp.json()["access_token"]
     print(f"❌ Token error {resp.status_code}: {resp.text}")
-    return None
+    return None 
 
 
 # ─────────────────────────────────────────────────────────
