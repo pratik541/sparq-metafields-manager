@@ -20,7 +20,7 @@ if _env_file.exists():
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title  = "Sparq Metafields Manager",
+    page_title  = "Metafields Manager",
     page_icon   = "💎",
     layout      = "wide",
     initial_sidebar_state = "expanded"
@@ -195,6 +195,7 @@ METAFIELD_TYPES = {
     ("custom",             "product_rating")    : "number_decimal",
     ("custom",             "ribbon_text")       : "single_line_text_field",
     ("custom",             "prod_var_details")  : "rich_text_field",
+    ("custom",             "product_details")   : "rich_text_field",
     ("mm-google-shopping", "custom_product")    : "boolean",
     ("shopify",            "age-group")         : "single_line_text_field",
     ("shopify",            "color-pattern")     : "single_line_text_field",
@@ -503,17 +504,21 @@ with st.sidebar:
     st.markdown("""
     <div style='font-size:0.75rem;color:#666;line-height:1.6'>
     <b>Metafields supported:</b><br>
+    <b style='color:#444'>Product level:</b><br>
+    • custom.product_details<br>
     • custom.happy_shoppers<br>
     • custom.loved_by_customers<br>
     • custom.product_rating<br>
     • custom.ribbon_text<br>
+    • mm-google-shopping.custom_product<br>
     • shopify.jewelry-type<br>
     • shopify.jewelry-material<br>
     • shopify.target-gender<br>
     • shopify.earring-design<br>
     • shopify.color-pattern<br>
     • shopify.age-group<br>
-    • mm-google-shopping.custom_product
+    <b style='color:#444'>Variant level:</b><br>
+    • custom.prod_var_details
     </div>
     """, unsafe_allow_html=True)
 
@@ -569,7 +574,7 @@ if st.session_state.connected:
         </div>""", unsafe_allow_html=True)
     with col4:
         st.markdown(f"""<div class="stat-card">
-            <div class="stat-number">11</div>
+            <div class="stat-number">{len(METAFIELD_TYPES)}</div>
             <div class="stat-label">Metafield Columns</div>
         </div>""", unsafe_allow_html=True)
 
@@ -839,22 +844,37 @@ with tab4:
 
     # Expected format info
     with st.expander("📋 Expected CSV Format", expanded=False):
-        st.markdown("Your CSV must have these **6 columns** (exact names):")
+        st.markdown("Your CSV must have these **7 columns** (exact names):")
         sample_df = pd.DataFrame([
             {
-                "Handle":             "sparq-lab-grown-diamond-017ct-...",
-                "Variant SKU":        "SQTNP8520-EG-925S-0.17CT",
-                "Metafield namespace":"custom",
-                "Metafield Key":      "product_details",
-                "Metafield type":     "rich_text_field",
-                "Metafield Value":    "Your value here",
-            }
+                "Handle":              "",
+                "Variant SKU":         "SQT19349-EG-925S-0.8CT",
+                "Owner":               "variant",
+                "Metafield namespace": "custom",
+                "Metafield Key":       "prod_var_details",
+                "Metafield type":      "rich_text_field",
+                "Metafield Value":     "Diamond details here",
+            },
+            {
+                "Handle":              "",
+                "Variant SKU":         "SQT19349-EG-925S-0.8CT",
+                "Owner":               "product",
+                "Metafield namespace": "custom",
+                "Metafield Key":       "product_details",
+                "Metafield type":      "rich_text_field",
+                "Metafield Value":     "Product details here",
+            },
         ])
         st.dataframe(sample_df, use_container_width=True)
         st.markdown("""
+        **Owner column (controls which Shopify endpoint is used):**
+        - `variant` → `variants/{id}/metafields` — use for **prod_var_details**
+        - `product` → `products/{id}/metafields` — use for **product_details** and all product-level fields
+        - *(blank)* → auto: SKU present = variant, Handle only = product
+
         **Match logic:**
-        - Tries **Handle** first (exact match)
-        - Falls back to **Variant SKU** if handle not found
+        - SKU present → finds the matching variant (and its parent product)
+        - SKU empty → finds product by Handle (exact match)
         - If metafield already exists → **updates** it
         - If metafield doesn't exist → **creates** it
         """)
