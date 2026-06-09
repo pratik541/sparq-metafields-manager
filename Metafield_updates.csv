@@ -1,0 +1,30 @@
+Handle,Variant SKU,Owner,Metafield namespace,Metafield Key,Metafield type,Metafield Value
+,SQT19349-EG-925S-0.8CT,variant,custom,prod_var_details,rich_text_field,abc
+,SQT19349-EG-925S-0.8CT,product,custom,product_details,rich_text_field,12
+,SQT19348-EG-925S-0.32CT,variant,custom,prod_var_details,rich_text_field,sad
+,SQT19348-EG-925S-0.32CT,product,custom,product_details,rich_text_field,4
+,SQT19347-EG-925S-0.81CT,variant,custom,prod_var_details,rich_text_field,gsf
+,SQT19347-EG-925S-0.81CT,product,custom,product_details,rich_text_field,4
+,SQT19346-EG-925S-0.38CT,variant,custom,prod_var_details,rich_text_field,rag
+,SQT19346-EG-925S-0.38CT,product,custom,product_details,rich_text_field,76
+,SQT19345-EG-925S-0.19CT,variant,custom,prod_var_details,rich_text_field,adf
+,SQT19345-EG-925S-0.19CT,product,custom,product_details,rich_text_field,4
+,SQT19344-EG-925S-0.9CT,variant,custom,prod_var_details,rich_text_field,adf
+,SQT19344-EG-925S-0.9CT,product,custom,product_details,rich_text_field,3
+,SQT19343-EG-925S-0.36CT,variant,custom,prod_var_details,rich_text_field,ad a
+,SQT19343-EG-925S-0.36CT,product,custom,product_details,rich_text_field,7
+,SQT19341-EG-925S-0.44CT,variant,custom,prod_var_details,rich_text_field,aec
+,SQT19341-EG-925S-0.44CT,product,custom,product_details,rich_text_field,2
+,SQT19340-EG-925S-0.2CT,variant,custom,prod_var_details,rich_text_field,adca
+,SQT19340-EG-925S-0.2CT,product,custom,product_details,rich_text_field,1
+,SQT19339-EG-925S-0.18CT,variant,custom,prod_var_details,rich_text_field,ada
+,SQT19339-EG-925S-0.18CT,product,custom,product_details,rich_text_field,9
+,SQT19338-EG-925S-0.93CT,variant,custom,prod_var_details,rich_text_field,gsf
+,SQT19338-EG-925S-0.93CT,product,custom,product_details,rich_text_field,3
+,SQT19337-EG-925S-0.73CT,variant,custom,prod_var_details,rich_text_field,yet
+,SQT19337-EG-925S-0.73CT,product,custom,product_details,rich_text_field,8
+,SQT19336-EG-925S-0.88CT,variant,custom,prod_var_details,rich_text_field,raew
+,SQT19336-EG-925S-0.88CT,product,custom,product_details,rich_text_field,3
+,SQT19335-EG-925S-2.85CT,variant,custom,prod_var_details,rich_text_field,ased
+,SQT19335-EG-925S-2.85CT,product,custom,product_details,rich_text_field,6
+,SQT19334-EG-925S-1.27CT,variant,custom,prod_var_details,rich_text_field,yetv
