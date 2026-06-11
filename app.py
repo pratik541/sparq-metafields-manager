@@ -264,7 +264,7 @@ def get_access_token(store_url, client_id, client_secret):
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
-        }, timeout=15)
+        }, timeout=60)
     except requests.exceptions.Timeout:
         return None, "Connection timed out. Check your Store URL and network."
     except requests.exceptions.ConnectionError:
@@ -278,7 +278,7 @@ def fetch_all_products(headers, store_url):
     products = []
     url = f"https://{store_url}/admin/api/2025-01/products.json?limit=250"
     while url:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=60)
         if resp.status_code != 200:
             break
         products.extend(resp.json().get("products", []))
@@ -294,7 +294,7 @@ def fetch_all_products(headers, store_url):
 
 def fetch_metafields(headers, store_url, product_id):
     url  = f"https://{store_url}/admin/api/2025-01/products/{product_id}/metafields.json"
-    resp = requests.get(url, headers=headers, timeout=15)
+    resp = requests.get(url, headers=headers, timeout=60)
     if resp.status_code == 200:
         return resp.json().get("metafields", [])
     return []
@@ -343,7 +343,7 @@ def create_product(headers, store_url, row, all_rows):
         "published": True,
     }}
 
-    resp = requests.post(f"https://{store_url}/admin/api/2025-01/products.json", headers=headers, json=data, timeout=15)
+    resp = requests.post(f"https://{store_url}/admin/api/2025-01/products.json", headers=headers, json=data, timeout=60)
     if resp.status_code == 201:
         return resp.json()["product"]["id"], None
     return None, resp.text[:200]
@@ -367,7 +367,7 @@ def set_metafields_for_product(headers, store_url, product_id, row, meta_cols):
             elif mf_type == "boolean":        value = "true" if value.lower() in ("true","1","yes") else "false"
         except:
             mf_type = "single_line_text_field"
-        resp = requests.post(url, headers=headers, json={"metafield": {"namespace":ns,"key":key,"value":value,"type":mf_type}}, timeout=15)
+        resp = requests.post(url, headers=headers, json={"metafield": {"namespace":ns,"key":key,"value":value,"type":mf_type}}, timeout=60)
         if resp.status_code == 201:
             logs.append(f"✅ {ns}.{key} = {value}")
             ok += 1
@@ -1023,7 +1023,7 @@ with tab4:
 
                 # Check if metafield already exists on this owner
                 mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
-                mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=15)
+                mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=60)
                 existing_id = None
                 if mf_resp.status_code == 200:
                     for mf in mf_resp.json().get("metafields",[]):
@@ -1065,7 +1065,7 @@ with tab4:
                     # UPDATE
                     resp = requests.put(
                         f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
-                        headers=st.session_state.headers, json=payload, timeout=15
+                        headers=st.session_state.headers, json=payload, timeout=60
                     )
                     if resp.status_code == 200:
                         ulog(f"  🔄 UPDATED → {namespace}.{key} = {str(value)[:40]}")
@@ -1075,7 +1075,7 @@ with tab4:
                         failed += 1
                 else:
                     # CREATE — mf_url already points to the correct owner (variant or product)
-                    resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=15)
+                    resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=60)
                     if resp.status_code == 201:
                         ulog(f"  ✨ CREATED → {namespace}.{key} = {str(value)[:40]}")
                         ucreated += 1
