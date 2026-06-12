@@ -1024,6 +1024,7 @@ with tab4:
                 # Check if metafield already exists on this owner
                 mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
                 mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=60)
+                time.sleep(0.6)  # space out after GET to stay under Shopify 2 calls/sec limit
                 existing_id = None
                 if mf_resp.status_code == 200:
                     for mf in mf_resp.json().get("metafields",[]):
@@ -1041,7 +1042,6 @@ with tab4:
                     elif mf_type == "boolean":
                         raw = "true" if raw.lower() in ("true", "1", "yes") else "false"
                     elif mf_type == "rich_text_field":
-                        # Only skip wrapping if value is already a Shopify rich text JSON object
                         try:
                             parsed = json.loads(raw)
                             already_rich = isinstance(parsed, dict) and parsed.get("type") == "root"
@@ -1062,11 +1062,18 @@ with tab4:
                 }}
 
                 if existing_id:
-                    # UPDATE
+                    # UPDATE — retry once on 429 rate limit
                     resp = requests.put(
                         f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
                         headers=st.session_state.headers, json=payload, timeout=60
                     )
+                    if resp.status_code == 429:
+                        ulog(f"  ⏳ Rate limited — waiting 3s before retry...")
+                        time.sleep(3)
+                        resp = requests.put(
+                            f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
+                            headers=st.session_state.headers, json=payload, timeout=60
+                        )
                     if resp.status_code == 200:
                         ulog(f"  🔄 UPDATED → {namespace}.{key} = {str(value)[:40]}")
                         updated += 1
@@ -1074,8 +1081,12 @@ with tab4:
                         ulog(f"  ❌ Update failed: {resp.text[:80]}")
                         failed += 1
                 else:
-                    # CREATE — mf_url already points to the correct owner (variant or product)
+                    # CREATE — retry once on 429 rate limit
                     resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=60)
+                    if resp.status_code == 429:
+                        ulog(f"  ⏳ Rate limited — waiting 3s before retry...")
+                        time.sleep(3)
+                        resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=60)
                     if resp.status_code == 201:
                         ulog(f"  ✨ CREATED → {namespace}.{key} = {str(value)[:40]}")
                         ucreated += 1
@@ -1083,7 +1094,7 @@ with tab4:
                         ulog(f"  ❌ Create failed: {resp.text[:80]}")
                         failed += 1
 
-                time.sleep(0.35)
+                time.sleep(0.6)
 
             update_prog.progress(1.0)
             update_status.markdown("**✅ Update complete!**")
