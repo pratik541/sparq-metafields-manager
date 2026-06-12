@@ -253,6 +253,17 @@ TEMPLATE_COLS = [
     "Variant Image","Variant Weight Unit","Variant Tax Code","Cost per item","Status",
 ]
 
+BATCH_SIZE = 25  # metafieldsSet accepts max 25 per call
+
+METAFIELDS_SET_MUTATION = """
+mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id key namespace }
+    userErrors { field message elementIndex }
+  }
+}
+"""
+
 
 # ─────────────────────────────────────────────────────────
 # API HELPERS
@@ -376,6 +387,39 @@ def set_metafields_for_product(headers, store_url, product_id, row, meta_cols):
             fail += 1
         time.sleep(0.2)
     return ok, skip, fail, logs
+
+
+def format_value_bulk(value, mf_type):
+    """Format CSV value → correct Shopify string for any metafield type."""
+    raw = str(value).strip().lstrip("'")
+    try:
+        if mf_type == "number_integer":
+            return str(int(float(raw)))
+        if mf_type == "number_decimal":
+            return str(float(raw))
+        if mf_type == "boolean":
+            return "true" if raw.lower() in ("true", "1", "yes") else "false"
+        if mf_type == "rich_text_field":
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and parsed.get("type") == "root":
+                    return raw
+            except (json.JSONDecodeError, ValueError):
+                pass
+            plain = re.sub(r"<[^>]+>", "", raw).strip()
+            return json.dumps({
+                "type": "root",
+                "children": [{"type": "paragraph", "children": [{"type": "text", "value": plain}]}]
+            })
+        if mf_type == "json":
+            try:
+                json.loads(raw)
+                return raw
+            except json.JSONDecodeError:
+                return json.dumps(raw)
+    except (ValueError, TypeError):
+        pass
+    return raw
 
 
 def parse_metafield_columns(df_columns):
@@ -585,7 +629,7 @@ else:
 
 
 # ── Tabs ──────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)"])
 
 
 # ─────────────────────────────────────────────────────────
@@ -1112,5 +1156,216 @@ with tab4:
             c2.metric("✨ Created",   ucreated)
             c3.metric("❌ Failed",    failed)
             c4.metric("🔍 Not Found", notfound)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────
+# TAB 5 — BULK UPDATE  (GraphQL metafieldsSet, 40k+ rows)
+# ─────────────────────────────────────────────────────────
+with tab5:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">⚡ Bulk Update Metafields</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-subtitle">Uses Shopify GraphQL <code>metafieldsSet</code> — 25 metafields per API call. Recommended for 1,000+ rows. The regular Update tab is still available as fallback.</div>', unsafe_allow_html=True)
+
+    with st.expander("📋 CSV Format (same as Update tab)", expanded=False):
+        bulk_sample = pd.DataFrame([
+            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "variant", "Metafield namespace": "custom", "Metafield Key": "prod_var_details",  "Metafield type": "rich_text_field", "Metafield Value": "Diamond details"},
+            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "product", "Metafield namespace": "custom", "Metafield Key": "product_details",   "Metafield type": "rich_text_field", "Metafield Value": "Product details"},
+        ])
+        st.dataframe(bulk_sample, use_container_width=True)
+        st.markdown("""
+        - `Owner=variant` → `gid://shopify/ProductVariant/{id}`
+        - `Owner=product` → `gid://shopify/Product/{id}`
+        - blank Owner → auto (SKU present = variant, Handle only = product)
+        """)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    bulk_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_file")
+
+    if bulk_file:
+        df_bulk = pd.read_csv(bulk_file, encoding="utf-8-sig")
+        df_bulk = df_bulk.loc[:, ~df_bulk.columns.str.startswith("Unnamed")]
+
+        required_cols = ["Handle", "Variant SKU", "Metafield namespace",
+                         "Metafield Key", "Metafield type", "Metafield Value"]
+        missing_cols  = [c for c in required_cols if c not in df_bulk.columns]
+
+        if missing_cols:
+            st.error(f"❌ Missing columns: {missing_cols}")
+        else:
+            total_rows    = len(df_bulk)
+            total_batches = (total_rows + BATCH_SIZE - 1) // BATCH_SIZE
+            est_seconds   = total_batches * 1.2
+            est_label     = f"~{round(est_seconds / 60, 1)} min" if est_seconds >= 60 else f"~{int(est_seconds)}s"
+
+            col_b1, col_b2, col_b3 = st.columns(3)
+            col_b1.metric("Total Rows",          total_rows)
+            col_b2.metric(f"Batches ({BATCH_SIZE}/batch)", total_batches)
+            col_b3.metric("Estimated Time",      est_label)
+
+            with st.expander("👁️ Preview", expanded=False):
+                st.dataframe(df_bulk.head(10), use_container_width=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if st.button("⚡ Start Bulk Update", key="btn_bulk"):
+                with st.spinner("Loading products from store..."):
+                    products_cache = fetch_all_products(
+                        st.session_state.headers, st.session_state.store_url
+                    )
+
+                bulk_log    = st.empty()
+                bulk_prog   = st.progress(0)
+                bulk_status = st.empty()
+                b_logs      = []
+
+                def blog(msg):
+                    b_logs.append(msg)
+                    log_html = "<br>".join(b_logs[-50:])
+                    bulk_log.markdown(
+                        f'<div class="log-box">{log_html}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                blog(f"📦 {len(products_cache)} products loaded")
+                blog(f"📄 Building metafield inputs from {total_rows} rows...")
+                blog("─────────────────────────────────────")
+
+                # ── Build inputs list ─────────────────────────────
+                metafield_inputs = []
+                prep_skipped  = 0
+                prep_notfound = 0
+
+                for _, row in df_bulk.iterrows():
+                    handle    = str(row.get("Handle",             "")).strip()
+                    sku       = str(row.get("Variant SKU",        "")).strip()
+                    namespace = str(row.get("Metafield namespace","")).strip()
+                    key_      = str(row.get("Metafield Key",      "")).strip()
+                    mf_type   = str(row.get("Metafield type",     "")).strip()
+                    owner_col = str(row.get("Owner",              "")).strip().lower()
+                    value     = row.get("Metafield Value", "")
+
+                    if pd.isna(value) or str(value).strip() in ("", "nan"):
+                        prep_skipped += 1
+                        continue
+
+                    sku_clean    = sku.lower()    not in ("", "nan", "none")
+                    handle_clean = handle.lower() not in ("", "nan", "none")
+                    wants_product = owner_col in ("product", "products")
+
+                    owner_gid = None
+                    if sku_clean:
+                        for p in products_cache:
+                            for v in p.get("variants", []):
+                                if str(v.get("sku", "")).strip() == sku:
+                                    if wants_product:
+                                        owner_gid = f"gid://shopify/Product/{p['id']}"
+                                    else:
+                                        owner_gid = f"gid://shopify/ProductVariant/{v['id']}"
+                                    break
+                            if owner_gid:
+                                break
+
+                    if not owner_gid and handle_clean:
+                        for p in products_cache:
+                            if p.get("handle", "").strip() == handle:
+                                owner_gid = f"gid://shopify/Product/{p['id']}"
+                                break
+
+                    if not owner_gid:
+                        prep_notfound += 1
+                        continue
+
+                    metafield_inputs.append({
+                        "ownerId":   owner_gid,
+                        "namespace": namespace,
+                        "key":       key_,
+                        "type":      mf_type,
+                        "value":     format_value_bulk(value, mf_type),
+                    })
+
+                blog(f"✅ {len(metafield_inputs)} inputs ready | ⏭️ {prep_skipped} skipped | ❌ {prep_notfound} not found")
+                blog(f"🚀 Sending {(len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE} batches to Shopify GraphQL...")
+                blog("─────────────────────────────────────")
+
+                # ── Send batches ──────────────────────────────────
+                gql_url     = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
+                success_cnt = 0
+                error_cnt   = 0
+                real_batches = (len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
+
+                for batch_i in range(real_batches):
+                    batch = metafield_inputs[batch_i * BATCH_SIZE : (batch_i + 1) * BATCH_SIZE]
+                    bulk_prog.progress((batch_i + 1) / real_batches)
+                    bulk_status.markdown(
+                        f"**Batch [{batch_i+1}/{real_batches}]** — "
+                        f"{success_cnt} done, {error_cnt} errors"
+                    )
+
+                    for attempt in range(3):
+                        resp = requests.post(
+                            gql_url,
+                            headers=st.session_state.headers,
+                            json={"query": METAFIELDS_SET_MUTATION,
+                                  "variables": {"metafields": batch}},
+                            timeout=60
+                        )
+
+                        if resp.status_code == 429:
+                            blog(f"  ⏳ HTTP 429 — waiting 3s (batch {batch_i+1})")
+                            time.sleep(3)
+                            continue
+
+                        if resp.status_code != 200:
+                            blog(f"  ❌ HTTP {resp.status_code}: {resp.text[:80]}")
+                            error_cnt += len(batch)
+                            break
+
+                        data   = resp.json()
+                        errors = data.get("errors", [])
+
+                        # GraphQL throttle
+                        if errors and any(
+                            e.get("extensions", {}).get("code") == "THROTTLED"
+                            for e in errors
+                        ):
+                            retry_after = errors[0].get("extensions", {}).get("retryAfter", 2)
+                            blog(f"  ⏳ Throttled — waiting {retry_after}s (batch {batch_i+1})")
+                            time.sleep(float(retry_after) + 0.5)
+                            continue
+
+                        result      = (data.get("data") or {}).get("metafieldsSet") or {}
+                        set_ok      = result.get("metafields", [])
+                        user_errors = result.get("userErrors", [])
+
+                        success_cnt += len(set_ok)
+                        if user_errors:
+                            for ue in user_errors:
+                                error_cnt += 1
+                                blog(f"  ❌ [{ue.get('elementIndex','')}] {ue.get('field','')}: {ue['message']}")
+                        else:
+                            blog(f"  ✅ Batch {batch_i+1}/{real_batches} — {len(set_ok)} metafields set")
+                        break
+
+                    time.sleep(0.5)
+
+                # ── Done ─────────────────────────────────────────
+                bulk_prog.progress(1.0)
+                bulk_status.markdown("**✅ Bulk update complete!**")
+                blog("")
+                blog("─────────────────────────────────────")
+                blog(f"✅ Metafields set  : {success_cnt}")
+                blog(f"❌ Errors          : {error_cnt}")
+                blog(f"⏭️  Skipped         : {prep_skipped}")
+                blog(f"🔍 Not found       : {prep_notfound}")
+                blog("─────────────────────────────────────")
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("✅ Set",       success_cnt)
+                d2.metric("❌ Errors",    error_cnt)
+                d3.metric("⏭️ Skipped",   prep_skipped)
+                d4.metric("🔍 Not Found", prep_notfound)
 
     st.markdown('</div>', unsafe_allow_html=True)
