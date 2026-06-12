@@ -495,7 +495,8 @@ if "token"      not in st.session_state: st.session_state.token      = None
 if "headers"    not in st.session_state: st.session_state.headers    = None
 if "store_url"  not in st.session_state: st.session_state.store_url  = os.getenv("SHOPIFY_STORE_URL", "")
 if "import_log" not in st.session_state: st.session_state.import_log = []
-if "export_df"  not in st.session_state: st.session_state.export_df  = None
+if "export_df"    not in st.session_state: st.session_state.export_df    = None
+if "bulk_results" not in st.session_state: st.session_state.bulk_results = None
 
 
 # ─────────────────────────────────────────────────────────
@@ -1211,6 +1212,8 @@ with tab5:
             st.markdown("<br>", unsafe_allow_html=True)
 
             if st.button("⚡ Start Bulk Update", key="btn_bulk"):
+                st.session_state.bulk_results = None  # reset previous run
+
                 with st.spinner("Loading products from store..."):
                     products_cache = fetch_all_products(
                         st.session_state.headers, st.session_state.store_url
@@ -1229,17 +1232,32 @@ with tab5:
                         unsafe_allow_html=True
                     )
 
-                blog(f"📦 {len(products_cache)} products loaded")
-                blog(f"📄 Building metafield inputs from {total_rows} rows...")
+                # ── Build O(1) lookup dicts once ──────────────────
+                # Avoids O(rows × products × variants) nested loops
+                blog(f"📦 {len(products_cache)} products — building lookup index...")
+                sku_map    = {}   # sku  → {"variant_gid": ..., "product_gid": ...}
+                handle_map = {}   # handle → product_gid
+                for p in products_cache:
+                    pgid = f"gid://shopify/Product/{p['id']}"
+                    handle_map[p.get("handle", "").strip()] = pgid
+                    for v in p.get("variants", []):
+                        s_key = str(v.get("sku", "")).strip()
+                        if s_key:
+                            sku_map[s_key] = {
+                                "variant_gid": f"gid://shopify/ProductVariant/{v['id']}",
+                                "product_gid": pgid,
+                            }
+                blog(f"✅ Index ready — {len(sku_map)} SKUs, {len(handle_map)} handles")
+                blog(f"📄 Resolving {total_rows} rows...")
                 blog("─────────────────────────────────────")
 
-                # ── Build inputs + track every row ────────────────
-                metafield_inputs = []   # API payloads (no meta)
-                metafield_metas  = []   # parallel: original row info
+                # ── Build inputs + track every row (no UI update per row) ──
+                metafield_inputs = []
+                metafield_metas  = []
                 skipped_rows     = []
                 notfound_rows    = []
 
-                for _, row in df_bulk.iterrows():
+                for row in df_bulk.to_dict("records"):
                     handle    = str(row.get("Handle",             "")).strip()
                     sku       = str(row.get("Variant SKU",        "")).strip()
                     namespace = str(row.get("Metafield namespace","")).strip()
@@ -1263,25 +1281,14 @@ with tab5:
                     handle_clean  = handle.lower() not in ("", "nan", "none")
                     wants_product = owner_col in ("product", "products")
 
+                    # O(1) dict lookup instead of nested loop
                     owner_gid = None
-                    if sku_clean:
-                        for p in products_cache:
-                            for v in p.get("variants", []):
-                                if str(v.get("sku", "")).strip() == sku:
-                                    owner_gid = (
-                                        f"gid://shopify/Product/{p['id']}"
-                                        if wants_product
-                                        else f"gid://shopify/ProductVariant/{v['id']}"
-                                    )
-                                    break
-                            if owner_gid:
-                                break
-
+                    if sku_clean and sku in sku_map:
+                        owner_gid = (sku_map[sku]["product_gid"]
+                                     if wants_product
+                                     else sku_map[sku]["variant_gid"])
                     if not owner_gid and handle_clean:
-                        for p in products_cache:
-                            if p.get("handle", "").strip() == handle:
-                                owner_gid = f"gid://shopify/Product/{p['id']}"
-                                break
+                        owner_gid = handle_map.get(handle)
 
                     if not owner_gid:
                         notfound_rows.append({**base_meta, "Reason": "SKU/handle not in store"})
@@ -1296,11 +1303,11 @@ with tab5:
                     })
                     metafield_metas.append(base_meta)
 
-                blog(f"✅ {len(metafield_inputs)} inputs ready | "
+                blog(f"✅ {len(metafield_inputs)} resolved | "
                      f"⏭️ {len(skipped_rows)} skipped | "
                      f"🔍 {len(notfound_rows)} not found")
-                blog(f"🚀 Sending {(len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE} "
-                     f"batches to Shopify GraphQL...")
+                real_batches = (len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
+                blog(f"🚀 Sending {real_batches} batches of {BATCH_SIZE} to Shopify GraphQL...")
                 blog("─────────────────────────────────────")
 
                 # ── Send batches — track per-row results ──────────
@@ -1309,7 +1316,6 @@ with tab5:
                 error_cnt    = 0
                 success_rows = []
                 failed_rows  = []
-                real_batches = (len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
 
                 for batch_i in range(real_batches):
                     s = batch_i * BATCH_SIZE
@@ -1348,8 +1354,8 @@ with tab5:
                         errors = data.get("errors", [])
 
                         if errors and any(
-                            e.get("extensions", {}).get("code") == "THROTTLED"
-                            for e in errors
+                            err.get("extensions", {}).get("code") == "THROTTLED"
+                            for err in errors
                         ):
                             retry_after = errors[0].get("extensions", {}).get("retryAfter", 2)
                             blog(f"  ⏳ Throttled — waiting {retry_after}s (batch {batch_i+1})")
@@ -1360,12 +1366,11 @@ with tab5:
                         set_ok      = result.get("metafields", [])
                         user_errors = result.get("userErrors", [])
 
-                        # Map elementIndex → failed items
-                        failed_idx = {}
-                        for ue in user_errors:
-                            idx = ue.get("elementIndex", -1)
-                            failed_idx[idx] = f"{ue.get('field','')}: {ue['message']}"
-
+                        failed_idx = {
+                            ue.get("elementIndex", -1):
+                                f"{ue.get('field','')}: {ue['message']}"
+                            for ue in user_errors
+                        }
                         for idx, meta in enumerate(batch_meta):
                             if idx in failed_idx:
                                 failed_rows.append({**meta, "Error": failed_idx[idx]})
@@ -1377,7 +1382,7 @@ with tab5:
                         if user_errors:
                             blog(f"  ⚠️ Batch {batch_i+1} — {len(set_ok)} set, "
                                  f"{len(user_errors)} errors")
-                            for ue in user_errors:
+                            for ue in user_errors[:5]:  # cap log lines
                                 blog(f"    ❌ [{ue.get('elementIndex','')}] "
                                      f"{ue.get('field','')}: {ue['message']}")
                         else:
@@ -1387,7 +1392,16 @@ with tab5:
 
                     time.sleep(0.5)
 
-                # ── Done ─────────────────────────────────────────
+                # ── Save results to session state ─────────────────
+                st.session_state.bulk_results = {
+                    "success_rows": success_rows,
+                    "failed_rows":  failed_rows,
+                    "skipped_rows": skipped_rows,
+                    "notfound_rows": notfound_rows,
+                    "success_cnt":  success_cnt,
+                    "error_cnt":    error_cnt,
+                }
+
                 bulk_prog.progress(1.0)
                 bulk_status.markdown("**✅ Bulk update complete!**")
                 blog("")
@@ -1398,7 +1412,18 @@ with tab5:
                 blog(f"🔍 Not found : {len(notfound_rows)}")
                 blog("─────────────────────────────────────")
 
+            # ── Show results (from session state, persists after re-render) ──
+            if st.session_state.bulk_results:
+                r = st.session_state.bulk_results
+                success_rows = r["success_rows"]
+                failed_rows  = r["failed_rows"]
+                skipped_rows = r["skipped_rows"]
+                notfound_rows = r["notfound_rows"]
+                success_cnt  = r["success_cnt"]
+                error_cnt    = r["error_cnt"]
+
                 # ── Summary metric cards ──────────────────────────
+                st.markdown("<br>", unsafe_allow_html=True)
                 d1, d2, d3, d4 = st.columns(4)
                 d1.metric("✅ Set",       success_cnt)
                 d2.metric("❌ Failed",    error_cnt)
