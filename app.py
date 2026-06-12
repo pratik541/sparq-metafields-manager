@@ -1233,10 +1233,11 @@ with tab5:
                 blog(f"📄 Building metafield inputs from {total_rows} rows...")
                 blog("─────────────────────────────────────")
 
-                # ── Build inputs list ─────────────────────────────
-                metafield_inputs = []
-                prep_skipped  = 0
-                prep_notfound = 0
+                # ── Build inputs + track every row ────────────────
+                metafield_inputs = []   # API payloads (no meta)
+                metafield_metas  = []   # parallel: original row info
+                skipped_rows     = []
+                notfound_rows    = []
 
                 for _, row in df_bulk.iterrows():
                     handle    = str(row.get("Handle",             "")).strip()
@@ -1247,12 +1248,19 @@ with tab5:
                     owner_col = str(row.get("Owner",              "")).strip().lower()
                     value     = row.get("Metafield Value", "")
 
+                    base_meta = {
+                        "Handle": handle, "Variant SKU": sku,
+                        "Owner": owner_col, "Namespace": namespace,
+                        "Key": key_, "Type": mf_type,
+                        "Value": str(value)[:80],
+                    }
+
                     if pd.isna(value) or str(value).strip() in ("", "nan"):
-                        prep_skipped += 1
+                        skipped_rows.append({**base_meta, "Reason": "Empty value"})
                         continue
 
-                    sku_clean    = sku.lower()    not in ("", "nan", "none")
-                    handle_clean = handle.lower() not in ("", "nan", "none")
+                    sku_clean     = sku.lower()    not in ("", "nan", "none")
+                    handle_clean  = handle.lower() not in ("", "nan", "none")
                     wants_product = owner_col in ("product", "products")
 
                     owner_gid = None
@@ -1260,10 +1268,11 @@ with tab5:
                         for p in products_cache:
                             for v in p.get("variants", []):
                                 if str(v.get("sku", "")).strip() == sku:
-                                    if wants_product:
-                                        owner_gid = f"gid://shopify/Product/{p['id']}"
-                                    else:
-                                        owner_gid = f"gid://shopify/ProductVariant/{v['id']}"
+                                    owner_gid = (
+                                        f"gid://shopify/Product/{p['id']}"
+                                        if wants_product
+                                        else f"gid://shopify/ProductVariant/{v['id']}"
+                                    )
                                     break
                             if owner_gid:
                                 break
@@ -1275,7 +1284,7 @@ with tab5:
                                 break
 
                     if not owner_gid:
-                        prep_notfound += 1
+                        notfound_rows.append({**base_meta, "Reason": "SKU/handle not in store"})
                         continue
 
                     metafield_inputs.append({
@@ -1285,19 +1294,29 @@ with tab5:
                         "type":      mf_type,
                         "value":     format_value_bulk(value, mf_type),
                     })
+                    metafield_metas.append(base_meta)
 
-                blog(f"✅ {len(metafield_inputs)} inputs ready | ⏭️ {prep_skipped} skipped | ❌ {prep_notfound} not found")
-                blog(f"🚀 Sending {(len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE} batches to Shopify GraphQL...")
+                blog(f"✅ {len(metafield_inputs)} inputs ready | "
+                     f"⏭️ {len(skipped_rows)} skipped | "
+                     f"🔍 {len(notfound_rows)} not found")
+                blog(f"🚀 Sending {(len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE} "
+                     f"batches to Shopify GraphQL...")
                 blog("─────────────────────────────────────")
 
-                # ── Send batches ──────────────────────────────────
-                gql_url     = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
-                success_cnt = 0
-                error_cnt   = 0
+                # ── Send batches — track per-row results ──────────
+                gql_url      = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
+                success_cnt  = 0
+                error_cnt    = 0
+                success_rows = []
+                failed_rows  = []
                 real_batches = (len(metafield_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
 
                 for batch_i in range(real_batches):
-                    batch = metafield_inputs[batch_i * BATCH_SIZE : (batch_i + 1) * BATCH_SIZE]
+                    s = batch_i * BATCH_SIZE
+                    e = s + BATCH_SIZE
+                    batch      = metafield_inputs[s:e]
+                    batch_meta = metafield_metas[s:e]
+
                     bulk_prog.progress((batch_i + 1) / real_batches)
                     bulk_status.markdown(
                         f"**Batch [{batch_i+1}/{real_batches}]** — "
@@ -1320,13 +1339,14 @@ with tab5:
 
                         if resp.status_code != 200:
                             blog(f"  ❌ HTTP {resp.status_code}: {resp.text[:80]}")
+                            for m in batch_meta:
+                                failed_rows.append({**m, "Error": f"HTTP {resp.status_code}"})
                             error_cnt += len(batch)
                             break
 
                         data   = resp.json()
                         errors = data.get("errors", [])
 
-                        # GraphQL throttle
                         if errors and any(
                             e.get("extensions", {}).get("code") == "THROTTLED"
                             for e in errors
@@ -1340,13 +1360,29 @@ with tab5:
                         set_ok      = result.get("metafields", [])
                         user_errors = result.get("userErrors", [])
 
-                        success_cnt += len(set_ok)
-                        if user_errors:
-                            for ue in user_errors:
+                        # Map elementIndex → failed items
+                        failed_idx = {}
+                        for ue in user_errors:
+                            idx = ue.get("elementIndex", -1)
+                            failed_idx[idx] = f"{ue.get('field','')}: {ue['message']}"
+
+                        for idx, meta in enumerate(batch_meta):
+                            if idx in failed_idx:
+                                failed_rows.append({**meta, "Error": failed_idx[idx]})
                                 error_cnt += 1
-                                blog(f"  ❌ [{ue.get('elementIndex','')}] {ue.get('field','')}: {ue['message']}")
+                            else:
+                                success_rows.append(meta)
+                                success_cnt += 1
+
+                        if user_errors:
+                            blog(f"  ⚠️ Batch {batch_i+1} — {len(set_ok)} set, "
+                                 f"{len(user_errors)} errors")
+                            for ue in user_errors:
+                                blog(f"    ❌ [{ue.get('elementIndex','')}] "
+                                     f"{ue.get('field','')}: {ue['message']}")
                         else:
-                            blog(f"  ✅ Batch {batch_i+1}/{real_batches} — {len(set_ok)} metafields set")
+                            blog(f"  ✅ Batch {batch_i+1}/{real_batches} — "
+                                 f"{len(set_ok)} metafields set")
                         break
 
                     time.sleep(0.5)
@@ -1356,16 +1392,68 @@ with tab5:
                 bulk_status.markdown("**✅ Bulk update complete!**")
                 blog("")
                 blog("─────────────────────────────────────")
-                blog(f"✅ Metafields set  : {success_cnt}")
-                blog(f"❌ Errors          : {error_cnt}")
-                blog(f"⏭️  Skipped         : {prep_skipped}")
-                blog(f"🔍 Not found       : {prep_notfound}")
+                blog(f"✅ Set       : {success_cnt}")
+                blog(f"❌ Failed    : {error_cnt}")
+                blog(f"⏭️  Skipped   : {len(skipped_rows)}")
+                blog(f"🔍 Not found : {len(notfound_rows)}")
                 blog("─────────────────────────────────────")
 
+                # ── Summary metric cards ──────────────────────────
                 d1, d2, d3, d4 = st.columns(4)
                 d1.metric("✅ Set",       success_cnt)
-                d2.metric("❌ Errors",    error_cnt)
-                d3.metric("⏭️ Skipped",   prep_skipped)
-                d4.metric("🔍 Not Found", prep_notfound)
+                d2.metric("❌ Failed",    error_cnt)
+                d3.metric("⏭️ Skipped",   len(skipped_rows))
+                d4.metric("🔍 Not Found", len(notfound_rows))
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # ── Detailed result tables ────────────────────────
+                if success_rows:
+                    with st.expander(f"✅ Successful ({len(success_rows)} rows)", expanded=False):
+                        df_ok = pd.DataFrame(success_rows)
+                        st.dataframe(df_ok, use_container_width=True, height=300)
+                        csv_ok = df_ok.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇️ Download successful rows",
+                            data=csv_ok,
+                            file_name=f"bulk_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+
+                if failed_rows:
+                    with st.expander(f"❌ Failed ({len(failed_rows)} rows)", expanded=True):
+                        df_fail = pd.DataFrame(failed_rows)
+                        st.dataframe(df_fail, use_container_width=True, height=300)
+                        csv_fail = df_fail.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇️ Download failed rows",
+                            data=csv_fail,
+                            file_name=f"bulk_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+
+                if skipped_rows:
+                    with st.expander(f"⏭️ Skipped — empty value ({len(skipped_rows)} rows)", expanded=False):
+                        df_skip = pd.DataFrame(skipped_rows)
+                        st.dataframe(df_skip, use_container_width=True, height=300)
+                        csv_skip = df_skip.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇️ Download skipped rows",
+                            data=csv_skip,
+                            file_name=f"bulk_skipped_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+
+                if notfound_rows:
+                    with st.expander(f"🔍 Not Found — check SKU/handle ({len(notfound_rows)} rows)", expanded=True):
+                        df_nf = pd.DataFrame(notfound_rows)
+                        st.dataframe(df_nf, use_container_width=True, height=300)
+                        csv_nf = df_nf.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇️ Download not-found rows",
+                            data=csv_nf,
+                            file_name=f"bulk_notfound_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
 
     st.markdown('</div>', unsafe_allow_html=True)
