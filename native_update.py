@@ -84,6 +84,8 @@ def coerce_native_value(column, raw):
             amount = Decimal(cleaned)
         except InvalidOperation:
             return None, f"'{text}' is not a valid amount"
+        if not amount.is_finite():
+            return None, f"'{text}' is not a valid amount"
         if amount < 0:
             return None, f"'{text}' is negative — amounts must be zero or more"
         return cleaned, None
@@ -112,6 +114,8 @@ def coerce_native_value(column, raw):
         try:
             grams = Decimal(text.replace(",", "").replace(" ", ""))
         except InvalidOperation:
+            return None, f"'{text}' is not a valid weight in grams"
+        if not grams.is_finite():
             return None, f"'{text}' is not a valid weight in grams"
         if grams < 0:
             return None, f"'{text}' is negative — weight must be zero or more"

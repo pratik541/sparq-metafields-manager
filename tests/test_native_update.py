@@ -43,6 +43,13 @@ class TestMoneyCoercion:
         assert value is None
         assert "negative" in error
 
+    @pytest.mark.parametrize("raw", ["nan", "NaN", "Infinity", "Inf", "-Infinity"])
+    def test_non_finite_amount_is_an_error(self, raw):
+        value, error = coerce_native_value("Variant Price", raw)
+        assert value is None
+        assert error is not None
+        assert "not a valid amount" in error
+
 
 class TestClearSentinel:
     def test_clear_on_compare_at_returns_none_without_error(self):
@@ -103,6 +110,13 @@ class TestWeightCoercion:
     def test_invalid_weight_is_an_error(self):
         value, error = coerce_native_value("Variant Grams", "heavy")
         assert value is None
+        assert "not a valid weight" in error
+
+    @pytest.mark.parametrize("raw", ["nan", "NaN", "Infinity", "Inf", "-Infinity"])
+    def test_non_finite_weight_is_an_error(self, raw):
+        value, error = coerce_native_value("Variant Grams", raw)
+        assert value is None
+        assert error is not None
         assert "not a valid weight" in error
 
 
