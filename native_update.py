@@ -135,3 +135,48 @@ def coerce_native_value(column, raw):
         return [part.strip() for part in text.split(",") if part.strip()], None
 
     return text, None
+
+
+def _assign_nested(target, path, value):
+    """Place value at a dotted path inside target, creating intermediate dicts."""
+    parts = path.split(".")
+    cursor = target
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = value
+
+
+def _build_input(row, gid, field_map):
+    """Shared builder for variant and product inputs.
+
+    Returns (input_dict_or_None, errors). Only columns that are present in the
+    row AND non-blank AND coerce cleanly appear in the result.
+    """
+    result = {"id": gid}
+    errors = []
+
+    for column, path in field_map.items():
+        if column not in row:
+            continue
+        raw = row[column]
+        if is_blank(raw):
+            continue
+        value, error = coerce_native_value(column, raw)
+        if error:
+            errors.append(f"{column}: {error}")
+            continue
+        _assign_nested(result, path, value)
+
+    if len(result) == 1:  # only "id" — nothing to update
+        return None, errors
+    return result, errors
+
+
+def build_variant_input(row, variant_gid):
+    """Build a ProductVariantsBulkInput dict for one CSV row."""
+    return _build_input(row, variant_gid, NATIVE_VARIANT_FIELDS)
+
+
+def build_product_input(row, product_gid):
+    """Build a ProductInput dict for one CSV row."""
+    return _build_input(row, product_gid, NATIVE_PRODUCT_FIELDS)

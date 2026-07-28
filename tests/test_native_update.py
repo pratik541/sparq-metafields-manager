@@ -149,3 +149,99 @@ class TestTagsCoercion:
 class TestPassthrough:
     def test_plain_text_trimmed(self):
         assert coerce_native_value("Title", "  Gold Earrings  ") == ("Gold Earrings", None)
+
+
+from native_update import build_product_input, build_variant_input
+
+VARIANT_GID = "gid://shopify/ProductVariant/111"
+PRODUCT_GID = "gid://shopify/Product/222"
+
+
+class TestBuildVariantInput:
+    def test_price_only(self):
+        result, errors = build_variant_input({"Variant Price": "1999"}, VARIANT_GID)
+        assert errors == []
+        assert result == {"id": VARIANT_GID, "price": "1999"}
+
+    def test_absent_column_never_sent(self):
+        result, _ = build_variant_input({"Variant Price": "1999"}, VARIANT_GID)
+        assert "compareAtPrice" not in result
+        assert "inventoryItem" not in result
+
+    def test_blank_cell_never_sent(self):
+        row = {"Variant Price": "1999", "Variant Compare At Price": "", "Variant Barcode": float("nan")}
+        result, errors = build_variant_input(row, VARIANT_GID)
+        assert errors == []
+        assert result == {"id": VARIANT_GID, "price": "1999"}
+
+    def test_clear_sends_explicit_null(self):
+        result, errors = build_variant_input({"Variant Compare At Price": "CLEAR"}, VARIANT_GID)
+        assert errors == []
+        assert result == {"id": VARIANT_GID, "compareAtPrice": None}
+
+    def test_inventory_item_fields_nested(self):
+        row = {"Cost per item": "500", "Variant Requires Shipping": "TRUE", "Variant Inventory Tracker": "shopify"}
+        result, errors = build_variant_input(row, VARIANT_GID)
+        assert errors == []
+        assert result["inventoryItem"] == {
+            "cost": "500",
+            "requiresShipping": True,
+            "tracked": True,
+        }
+
+    def test_weight_nested_under_measurement(self):
+        result, errors = build_variant_input({"Variant Grams": "1000"}, VARIANT_GID)
+        assert errors == []
+        assert result["inventoryItem"] == {"measurement": {"weight": {"value": 1000.0, "unit": "GRAMS"}}}
+
+    def test_weight_and_cost_coexist(self):
+        result, _ = build_variant_input({"Variant Grams": "50", "Cost per item": "10"}, VARIANT_GID)
+        assert result["inventoryItem"]["cost"] == "10"
+        assert result["inventoryItem"]["measurement"]["weight"]["value"] == 50.0
+
+    def test_weight_unit_column_is_ignored(self):
+        row = {"Variant Grams": "1000", "Variant Weight Unit": "kg"}
+        result, errors = build_variant_input(row, VARIANT_GID)
+        assert errors == []
+        assert result["inventoryItem"]["measurement"]["weight"] == {"value": 1000.0, "unit": "GRAMS"}
+
+    def test_no_updatable_fields_returns_none(self):
+        result, errors = build_variant_input({"Handle": "some-handle", "Variant SKU": "ABC"}, VARIANT_GID)
+        assert result is None
+        assert errors == []
+
+    def test_bad_value_reported_and_other_fields_still_built(self):
+        row = {"Variant Price": "abc", "Variant Barcode": "XYZ"}
+        result, errors = build_variant_input(row, VARIANT_GID)
+        assert result == {"id": VARIANT_GID, "barcode": "XYZ"}
+        assert len(errors) == 1
+        assert "Variant Price" in errors[0]
+
+
+class TestBuildProductInput:
+    def test_title_and_tags(self):
+        row = {"Title": "Gold Earrings", "Tags": "gold, diamond"}
+        result, errors = build_product_input(row, PRODUCT_GID)
+        assert errors == []
+        assert result == {"id": PRODUCT_GID, "title": "Gold Earrings", "tags": ["gold", "diamond"]}
+
+    def test_seo_nested(self):
+        row = {"SEO Title": "Buy Gold", "SEO Description": "Best gold"}
+        result, errors = build_product_input(row, PRODUCT_GID)
+        assert errors == []
+        assert result == {"id": PRODUCT_GID, "seo": {"title": "Buy Gold", "description": "Best gold"}}
+
+    def test_body_html_mapped_to_description_html(self):
+        result, _ = build_product_input({"Body (HTML)": "<p>hi</p>"}, PRODUCT_GID)
+        assert result["descriptionHtml"] == "<p>hi</p>"
+
+    def test_variant_columns_ignored_at_product_level(self):
+        result, errors = build_product_input({"Variant Price": "1999"}, PRODUCT_GID)
+        assert result is None
+        assert errors == []
+
+    def test_bad_status_reported(self):
+        result, errors = build_product_input({"Status": "live"}, PRODUCT_GID)
+        assert result is None
+        assert len(errors) == 1
+        assert "Status" in errors[0]
