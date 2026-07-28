@@ -74,7 +74,7 @@ Column names match the existing template (`app.py:223-254`) so that
 | `Cost per item` | `inventoryItem.cost` |
 | `Variant Grams` + `Variant Weight Unit` | `inventoryItem.measurement.weight.{value,unit}` |
 | `Variant Requires Shipping` | `inventoryItem.requiresShipping` |
-| `Variant Inventory Tracker` | `inventoryItem.tracked` (non-empty = true) |
+| `Variant Inventory Tracker` | `inventoryItem.tracked` (`shopify`/`true`/`1`/`yes` → true; `false`/`0`/`no`/`untracked` → false; anything else is a row error) |
 
 ### Product level — `productUpdate`
 
