@@ -278,3 +278,228 @@ class TestBatchingAndResolution:
         resolved = resolve_rows([{"Variant SKU": "SKU-1", "Variant Price": "12", "Title": "New Ring"}], sku_map, handle_map)
         assert resolved["variant_updates"][0]["variant_input"]["price"] == "12"
         assert resolved["product_updates"][0]["product_input"]["title"] == "New Ring"
+
+
+from native_update import extract_cost, points_floor_seconds, send_native_batch
+
+HEADERS = {"X-Shopify-Access-Token": "tok"}
+URL = "https://example.myshopify.com/admin/api/2025-01/graphql.json"
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class FakePoster:
+    """Returns queued responses in order and records the calls made."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, headers=None, json=None, timeout=None):
+        self.calls.append({"url": url, "json": json})
+        return self.responses.pop(0)
+
+
+def make_sleep_spy():
+    slept = []
+    return slept, slept.append
+
+
+def ok_payload(*alias_indexes):
+    return {"data": {
+        f"m{i}": {"productVariants": [{"id": f"v{i}"}], "userErrors": []}
+        for i in alias_indexes
+    }}
+
+
+class TestSendNativeBatch:
+    """Core retry and attribution behaviour — previously untested."""
+
+    def test_all_aliases_succeed(self):
+        poster = FakePoster([FakeResponse(payload=ok_payload(0, 1))])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {},
+                                       [[{"SKU": "A"}], [{"SKU": "B"}]], http_post=poster)
+        assert ok == [{"SKU": "A"}, {"SKU": "B"}]
+        assert failed == []
+
+    def test_user_error_attributed_to_its_own_alias(self):
+        poster = FakePoster([FakeResponse(payload={"data": {
+            "m0": {"productVariants": [], "userErrors": [{"field": "price", "message": "Bad price"}]},
+            "m1": {"productVariants": [{"id": "v1"}], "userErrors": []},
+        }})])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {},
+                                       [[{"SKU": "A"}], [{"SKU": "B"}]], http_post=poster)
+        assert ok == [{"SKU": "B"}]
+        assert failed[0]["SKU"] == "A"
+        assert "Bad price" in failed[0]["Error"]
+
+    def test_every_meta_in_a_failed_group_is_marked(self):
+        poster = FakePoster([FakeResponse(payload={"data": {
+            "m0": {"productVariants": [], "userErrors": [{"field": "price", "message": "Bad"}]},
+        }})])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {},
+                                       [[{"SKU": "A"}, {"SKU": "B"}]], http_post=poster)
+        assert ok == []
+        assert [f["SKU"] for f in failed] == ["A", "B"]
+
+    def test_http_429_sleeps_three_seconds_then_retries(self):
+        poster = FakePoster([FakeResponse(status_code=429, text="rate limited"),
+                             FakeResponse(payload=ok_payload(0))])
+        slept, sleep = make_sleep_spy()
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                       http_post=poster, sleep=sleep)
+        assert ok == [{"SKU": "A"}]
+        assert slept == [3]
+        assert len(poster.calls) == 2
+
+    def test_throttled_uses_retry_after_plus_half(self):
+        poster = FakePoster([
+            FakeResponse(payload={"errors": [{"extensions": {"code": "THROTTLED", "retryAfter": 1.5}}]}),
+            FakeResponse(payload=ok_payload(0)),
+        ])
+        slept, sleep = make_sleep_spy()
+        ok, _ = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                  http_post=poster, sleep=sleep)
+        assert ok == [{"SKU": "A"}]
+        assert slept == [2.0]
+
+    def test_gives_up_after_max_attempts(self):
+        poster = FakePoster([FakeResponse(status_code=429, text="x") for _ in range(3)])
+        slept, sleep = make_sleep_spy()
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                       http_post=poster, sleep=sleep)
+        assert ok == []
+        assert "3 attempts" in failed[0]["Error"]
+        assert len(poster.calls) == 3
+
+    def test_non_200_fails_batch_without_retrying(self):
+        poster = FakePoster([FakeResponse(status_code=500, text="boom")])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {},
+                                       [[{"SKU": "A"}], [{"SKU": "B"}]], http_post=poster)
+        assert ok == []
+        assert len(failed) == 2
+        assert "HTTP 500" in failed[0]["Error"]
+        assert len(poster.calls) == 1
+
+    def test_top_level_graphql_error_fails_batch(self):
+        poster = FakePoster([FakeResponse(payload={
+            "errors": [{"message": "Field 'nope' doesn't exist"}]
+        })])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]], http_post=poster)
+        assert ok == []
+        assert "doesn't exist" in failed[0]["Error"]
+
+    def test_missing_alias_in_response_is_a_failure(self):
+        poster = FakePoster([FakeResponse(payload={"data": {"m0": None}})])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]], http_post=poster)
+        assert ok == []
+        assert "no response" in failed[0]["Error"]
+
+
+COST_PAYLOAD = {
+    "extensions": {
+        "cost": {
+            "requestedQueryCost": 100,
+            "actualQueryCost": 96,
+            "throttleStatus": {
+                "maximumAvailable": 1000.0,
+                "currentlyAvailable": 904,
+                "restoreRate": 100.0,
+            },
+        }
+    }
+}
+
+
+class TestExtractCost:
+    def test_reads_every_field(self):
+        assert extract_cost(COST_PAYLOAD) == {
+            "requested": 100,
+            "actual": 96,
+            "maximum_available": 1000.0,
+            "currently_available": 904,
+            "restore_rate": 100.0,
+        }
+
+    def test_missing_extensions_returns_none(self):
+        assert extract_cost({"data": {}}) is None
+
+    def test_empty_cost_returns_none(self):
+        assert extract_cost({"extensions": {}}) is None
+
+    def test_missing_throttle_status_still_returns_costs(self):
+        body = {"extensions": {"cost": {"requestedQueryCost": 50, "actualQueryCost": 50}}}
+        result = extract_cost(body)
+        assert result["actual"] == 50
+        assert result["restore_rate"] is None
+
+    def test_null_extensions_does_not_crash(self):
+        assert extract_cost({"extensions": None}) is None
+
+
+class TestPointsFloorSeconds:
+    def test_divides_points_by_restore_rate(self):
+        assert points_floor_seconds(300_000, 100.0) == 3000.0
+
+    def test_plus_restore_rate_halves_it(self):
+        assert points_floor_seconds(300_000, 200.0) == 1500.0
+
+    def test_zero_restore_rate_returns_none(self):
+        assert points_floor_seconds(1000, 0) is None
+
+    def test_missing_restore_rate_returns_none(self):
+        assert points_floor_seconds(1000, None) is None
+
+    def test_zero_points_is_zero(self):
+        assert points_floor_seconds(0, 100.0) == 0.0
+
+
+class TestSendNativeBatchCostCallback:
+    def test_on_cost_called_on_success(self):
+        seen = []
+        payload = dict(COST_PAYLOAD)
+        payload["data"] = {"m0": {"productVariants": [{"id": "v0"}], "userErrors": []}}
+        poster = FakePoster([FakeResponse(payload=payload)])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                       http_post=poster, on_cost=seen.append)
+        assert ok == [{"SKU": "A"}]
+        assert len(seen) == 1
+        assert seen[0]["actual"] == 96
+
+    def test_on_cost_called_even_when_throttled(self):
+        seen = []
+        throttled = dict(COST_PAYLOAD)
+        throttled["errors"] = [{"extensions": {"code": "THROTTLED", "retryAfter": 1.0}}]
+        success = {"data": {"m0": {"productVariants": [{"id": "v0"}], "userErrors": []}}}
+        poster = FakePoster([FakeResponse(payload=throttled), FakeResponse(payload=success)])
+        slept, sleep = make_sleep_spy()
+        ok, _ = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                  http_post=poster, sleep=sleep, on_cost=seen.append)
+        assert ok == [{"SKU": "A"}]
+        assert len(seen) == 1, "cost from the throttled attempt should still be reported"
+
+    def test_no_cost_extension_does_not_call_back(self):
+        seen = []
+        poster = FakePoster([FakeResponse(payload={
+            "data": {"m0": {"productVariants": [{"id": "v0"}], "userErrors": []}}
+        })])
+        send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                          http_post=poster, on_cost=seen.append)
+        assert seen == []
+
+    def test_works_without_a_callback(self):
+        payload = dict(COST_PAYLOAD)
+        payload["data"] = {"m0": {"productVariants": [{"id": "v0"}], "userErrors": []}}
+        poster = FakePoster([FakeResponse(payload=payload)])
+        ok, failed = send_native_batch(HEADERS, URL, "q", {}, [[{"SKU": "A"}]],
+                                       http_post=poster)
+        assert ok == [{"SKU": "A"}]
+        assert failed == []

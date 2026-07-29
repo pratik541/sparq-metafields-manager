@@ -245,8 +245,47 @@ def _fail_all(alias_metas, reason):
     return [dict(meta, Error=reason) for metas in alias_metas for meta in metas]
 
 
-def send_native_batch(headers, gql_url, query, variables, alias_metas, http_post=None, sleep=None):
-    """Send an aliased mutation, retrying throttles and attributing errors to rows."""
+def extract_cost(body):
+    """Pull Shopify's calculated query cost out of a GraphQL response body.
+
+    Returns None when the response carries no cost extension. Without this the
+    app can only assume the documented ~10 points per mutation; with it we know
+    the real figure and the store's actual bucket size and restore rate.
+    """
+    extensions = body.get("extensions") or {}
+    cost = extensions.get("cost") or {}
+    if not cost:
+        return None
+    throttle = cost.get("throttleStatus") or {}
+    return {
+        "requested": cost.get("requestedQueryCost"),
+        "actual": cost.get("actualQueryCost"),
+        "maximum_available": throttle.get("maximumAvailable"),
+        "currently_available": throttle.get("currentlyAvailable"),
+        "restore_rate": throttle.get("restoreRate"),
+    }
+
+
+def points_floor_seconds(total_points, restore_rate):
+    """Minimum wall-clock to spend total_points at Shopify's restore rate.
+
+    This is a floor no amount of batching can beat: the bucket refills at a
+    fixed rate, so a job costing N points cannot finish faster than
+    N / restore_rate seconds. Returns None when the rate is unknown.
+    """
+    if not restore_rate or restore_rate <= 0:
+        return None
+    return total_points / restore_rate
+
+
+def send_native_batch(headers, gql_url, query, variables, alias_metas,
+                      http_post=None, sleep=None, on_cost=None):
+    """Send an aliased mutation, retrying throttles and attributing errors to rows.
+
+    on_cost, if given, is called with the extract_cost() dict for every response
+    that carries one — including throttled attempts, which are the most
+    informative about the bucket state.
+    """
     post, pause = http_post or requests.post, sleep or time.sleep
     for _attempt in range(MAX_ATTEMPTS):
         response = post(gql_url, headers=headers, json={"query": query, "variables": variables}, timeout=60)
@@ -257,6 +296,10 @@ def send_native_batch(headers, gql_url, query, variables, alias_metas, http_post
             return [], _fail_all(alias_metas, f"HTTP {response.status_code}: {response.text[:120]}")
 
         data = response.json()
+        if on_cost is not None:
+            cost = extract_cost(data)
+            if cost is not None:
+                on_cost(cost)
         errors = data.get("errors") or []
         throttled = [error for error in errors if error.get("extensions", {}).get("code") == "THROTTLED"]
         if throttled:

@@ -13,8 +13,8 @@ from native_update import (
     NATIVE_PRODUCT_FIELDS, NATIVE_VARIANT_FIELDS, PRODUCT_STATUSES,
     build_aliased_product_mutation,
     build_aliased_variant_mutation, build_lookup_index, chunk,
-    group_by_product, recognised_native_columns, resolve_rows,
-    send_native_batch,
+    group_by_product, points_floor_seconds, recognised_native_columns,
+    resolve_rows, send_native_batch,
 )
 from guide_data import (
     GUIDE_COLUMNS, GUIDE_ROWS, compare_with_guide, native_sample_rows,
@@ -841,25 +841,58 @@ with tab6:
                 if update_count and st.button("Apply native field updates", type="primary", key="native_apply_button"):
                     gql_url = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
                     progress, status = st.progress(0), st.empty()
+                    cost_box = st.empty()
                     successes, failures = [], []
                     variant_groups = group_by_product(preview["variant_updates"])
                     product_items = [(item["product_input"], item["meta"]) for item in preview["product_updates"]]
                     work = [("variant", batch) for batch in chunk(variant_groups, NATIVE_BATCH_SIZE)]
                     work += [("product", batch) for batch in chunk(product_items, NATIVE_BATCH_SIZE)]
+
+                    # Shopify reports the real query cost and bucket state per response.
+                    # Without it we can only assume the documented ~10 points/mutation.
+                    cost_samples = []
+                    mutations_sent = 0
                     for index, (kind, batch) in enumerate(work, start=1):
                         status.write(f"Sending batch {index} of {len(work)}...")
                         if kind == "variant":
                             query, variables = build_aliased_variant_mutation(batch)
                             alias_metas = [group["metas"] for group in batch]
+                            batch_mutations = len(batch)
                         else:
                             query, variables = build_aliased_product_mutation([item[0] for item in batch])
                             alias_metas = [[item[1]] for item in batch]
-                        ok, failed = send_native_batch(st.session_state.headers, gql_url, query, variables, alias_metas)
+                            batch_mutations = len(batch)
+                        ok, failed = send_native_batch(
+                            st.session_state.headers, gql_url, query, variables, alias_metas,
+                            on_cost=cost_samples.append
+                        )
                         successes.extend(ok)
                         failures.extend(failed)
+                        mutations_sent += batch_mutations
                         progress.progress(index / len(work))
+
+                        if cost_samples:
+                            latest = cost_samples[-1]
+                            per_mutation = (latest["actual"] / batch_mutations
+                                            if latest.get("actual") and batch_mutations else None)
+                            line = (
+                                f"Bucket {latest.get('currently_available')}/"
+                                f"{latest.get('maximum_available')} · "
+                                f"restore {latest.get('restore_rate')}/s · "
+                                f"this request cost {latest.get('actual')} points"
+                            )
+                            if per_mutation:
+                                line += f" ({per_mutation:.1f}/mutation)"
+                                remaining = max(0, len(work) * NATIVE_BATCH_SIZE - mutations_sent)
+                                floor = points_floor_seconds(
+                                    remaining * per_mutation, latest.get("restore_rate")
+                                )
+                                if floor:
+                                    line += f" · ~{floor / 60:.0f} min left at this rate"
+                            cost_box.caption(line)
+
                         time.sleep(0.5)
-                    st.session_state.native_results = {"success": successes, "failed": failures, "skipped": preview["skipped"], "notfound": preview["notfound"], "errors": preview["errors"]}
+                    st.session_state.native_results = {"success": successes, "failed": failures, "skipped": preview["skipped"], "notfound": preview["notfound"], "errors": preview["errors"], "cost_samples": cost_samples, "mutations_sent": mutations_sent}
                     status.success("Native-field update complete.")
             results = st.session_state.native_results
             if results:
