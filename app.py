@@ -20,6 +20,7 @@ from guide_data import (
     GUIDE_COLUMNS, GUIDE_ROWS, compare_with_guide, native_sample_rows,
 )
 from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definitions
+from eta import format_duration, progress_line, upfront_estimate_seconds
 
 _env_file = Path(__file__).parent / "config" / ".env"
 if _env_file.exists():
@@ -838,6 +839,25 @@ with tab5:
                     st.error(f"{len(preview['errors'])} row(s) have invalid values and will not be sent.")
                     st.dataframe(pd.DataFrame(preview["errors"]), use_container_width=True)
                 update_count = len(preview["variant_updates"]) + len(preview["product_updates"])
+
+                # Show the size of the job before committing to it.
+                planned_batches = (
+                    len(chunk(group_by_product(preview["variant_updates"]), NATIVE_BATCH_SIZE))
+                    + len(chunk(preview["product_updates"], NATIVE_BATCH_SIZE))
+                )
+                if update_count:
+                    plan_cols = st.columns(3)
+                    plan_cols[0].metric("Writes to send", update_count)
+                    plan_cols[1].metric(f"Requests ({NATIVE_BATCH_SIZE}/request)", planned_batches)
+                    plan_cols[2].metric(
+                        "Estimated Time",
+                        f"~{format_duration(upfront_estimate_seconds(planned_batches))}"
+                    )
+                    st.caption(
+                        "The estimate is refined from real throughput and Shopify's reported "
+                        "query cost once the run starts. Keep this tab open until it finishes."
+                    )
+
                 if update_count and st.button("Apply native field updates", type="primary", key="native_apply_button"):
                     gql_url = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
                     progress, status = st.progress(0), st.empty()
@@ -852,8 +872,14 @@ with tab5:
                     # Without it we can only assume the documented ~10 points/mutation.
                     cost_samples = []
                     mutations_sent = 0
+                    run_start = time.time()
                     for index, (kind, batch) in enumerate(work, start=1):
-                        status.write(f"Sending batch {index} of {len(work)}...")
+                        # index-1 requests have finished, so throughput is measurable
+                        status.markdown(
+                            f"**Sending request {index}/{len(work)}**  \n"
+                            + progress_line(time.time() - run_start, index - 1, len(work),
+                                            noun="Request")
+                        )
                         if kind == "variant":
                             query, variables = build_aliased_variant_mutation(batch)
                             alias_metas = [group["metas"] for group in batch]
@@ -893,7 +919,11 @@ with tab5:
 
                         time.sleep(0.5)
                     st.session_state.native_results = {"success": successes, "failed": failures, "skipped": preview["skipped"], "notfound": preview["notfound"], "errors": preview["errors"], "cost_samples": cost_samples, "mutations_sent": mutations_sent}
-                    status.success("Native-field update complete.")
+                    status.success(
+                        f"Native-field update complete — took "
+                        f"{format_duration(time.time() - run_start)} "
+                        f"for {len(work)} requests and {mutations_sent} writes."
+                    )
             results = st.session_state.native_results
             if results:
                 for label, key in (("Successful", "success"), ("Failed", "failed"), ("Skipped", "skipped"), ("Not found", "notfound"), ("Invalid", "errors")):
@@ -1098,13 +1128,16 @@ with tab4:
         else:
             total_rows    = len(df_bulk)
             total_batches = (total_rows + BATCH_SIZE - 1) // BATCH_SIZE
-            est_seconds   = total_batches * 1.2
-            est_label     = f"~{round(est_seconds / 60, 1)} min" if est_seconds >= 60 else f"~{int(est_seconds)}s"
 
             col_b1, col_b2, col_b3 = st.columns(3)
             col_b1.metric("Total Rows",          total_rows)
             col_b2.metric(f"Batches ({BATCH_SIZE}/batch)", total_batches)
-            col_b3.metric("Estimated Time",      est_label)
+            col_b3.metric("Estimated Time",
+                          f"~{format_duration(upfront_estimate_seconds(total_batches))}")
+            st.caption(
+                "The estimate is refined from real throughput once the run starts, so it "
+                "reflects any throttling rather than a fixed guess."
+            )
 
             with st.expander("👁️ Preview", expanded=False):
                 st.dataframe(df_bulk.head(10), use_container_width=True)
@@ -1216,6 +1249,7 @@ with tab4:
                 error_cnt    = 0
                 success_rows = []
                 failed_rows  = []
+                run_start    = time.time()
 
                 for batch_i in range(real_batches):
                     s = batch_i * BATCH_SIZE
@@ -1224,9 +1258,11 @@ with tab4:
                     batch_meta = metafield_metas[s:e]
 
                     bulk_prog.progress((batch_i + 1) / real_batches)
+                    # batch_i batches have finished, so the rate so far is measurable
                     bulk_status.markdown(
-                        f"**Batch [{batch_i+1}/{real_batches}]** — "
-                        f"{success_cnt} done, {error_cnt} errors"
+                        f"**Sending batch {batch_i+1}/{real_batches}** — "
+                        f"{success_cnt} done, {error_cnt} errors  \n"
+                        f"{progress_line(time.time() - run_start, batch_i, real_batches)}"
                     )
 
                     for attempt in range(3):
@@ -1303,7 +1339,11 @@ with tab4:
                 }
 
                 bulk_prog.progress(1.0)
-                bulk_status.markdown("**✅ Bulk update complete!**")
+                bulk_status.markdown(
+                    f"**✅ Metafield update complete** — took "
+                    f"{format_duration(time.time() - run_start)} "
+                    f"for {real_batches} batches"
+                )
                 blog("")
                 blog("─────────────────────────────────────")
                 blog(f"✅ Set       : {success_cnt}")
