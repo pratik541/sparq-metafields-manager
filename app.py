@@ -14,6 +14,9 @@ from native_update import (
     group_by_product, recognised_native_columns, resolve_rows,
     send_native_batch,
 )
+from guide_data import (
+    GUIDE_COLUMNS, GUIDE_ROWS, metafield_sample_rows, native_sample_rows,
+)
 
 _env_file = Path(__file__).parent / "config" / ".env"
 if _env_file.exists():
@@ -641,7 +644,7 @@ else:
 
 
 # ── Tabs ──────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)", "🛠️  Update Native Fields"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)", "🛠️  Update Native Fields", "📖  Guide"])
 
 
 # ─────────────────────────────────────────────────────────
@@ -1569,5 +1572,76 @@ with tab5:
                             file_name=f"bulk_notfound_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                             mime="text/csv"
                         )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────
+# TAB 7 — GUIDE (what to put in your CSV)
+# ─────────────────────────────────────────────────────────
+with tab7:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📖 Guide — what do I put in my CSV?</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-subtitle">Find the thing you want to change on the left, '
+        'then copy the key or column name into your CSV. No need to open Shopify to look it up.</div>',
+        unsafe_allow_html=True
+    )
+
+    guide_df = pd.DataFrame(GUIDE_ROWS, columns=GUIDE_COLUMNS)
+
+    g1, g2 = st.columns([2, 1])
+    search = g1.text_input("Search (e.g. price, rating, tags, weight)", key="guide_search")
+    kind   = g2.radio("Show", ["Everything", "Metafields only", "Native fields only"],
+                      horizontal=False, key="guide_kind")
+
+    view = guide_df
+    if kind == "Metafields only":
+        view = view[view["Kind"].str.startswith("Metafield")]
+    elif kind == "Native fields only":
+        view = view[view["Kind"] == "Native column"]
+    if search.strip():
+        needle = search.strip().lower()
+        view = view[view.apply(
+            lambda row: needle in " ".join(str(v).lower() for v in row.values), axis=1
+        )]
+
+    st.caption(f"Showing {len(view)} of {len(guide_df)} fields")
+    st.dataframe(view, use_container_width=True, hide_index=True, height=460)
+
+    st.markdown("---")
+    st.markdown("**Sample CSVs — download, edit, upload**")
+
+    s1, s2 = st.columns(2)
+    s1.download_button(
+        "⬇️ Native fields sample CSV",
+        data=pd.DataFrame(native_sample_rows()).to_csv(index=False).encode("utf-8"),
+        file_name="sample_native_fields.csv",
+        mime="text/csv",
+        key="guide_dl_native",
+        help="Upload this in the Update Native Fields tab"
+    )
+    s2.download_button(
+        "⬇️ Metafield update sample CSV",
+        data=pd.DataFrame(metafield_sample_rows()).to_csv(index=False).encode("utf-8"),
+        file_name="sample_metafield_update.csv",
+        mime="text/csv",
+        key="guide_dl_metafield",
+        help="Upload this in the Update Metafields or Bulk Update tab"
+    )
+
+    st.markdown("---")
+    st.markdown("""
+    **Three rules that stop accidents**
+
+    1. **A blank cell changes nothing.** Leave a cell empty and Shopify keeps its current value.
+       Delete the whole column if you are not changing that field.
+    2. **To empty a value on purpose, type `CLEAR`.** Works for Compare At Price and Barcode.
+    3. **Weight goes in `Variant Grams` as grams.** `Variant Weight Unit` is ignored — putting
+       `1000` with unit `kg` would otherwise become 1000 kg.
+
+    On the Update Native Fields tab, always press **Create dry-run preview** first and read the
+    before/after table. Set **Limit to first N rows** to 3 on your first run.
+    """)
 
     st.markdown('</div>', unsafe_allow_html=True)
