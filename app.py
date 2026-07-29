@@ -8,6 +8,12 @@ import re
 import io
 from datetime import datetime
 from pathlib import Path
+from native_update import (
+    NATIVE_BATCH_SIZE, build_aliased_product_mutation,
+    build_aliased_variant_mutation, build_lookup_index, chunk,
+    group_by_product, recognised_native_columns, resolve_rows,
+    send_native_batch,
+)
 
 _env_file = Path(__file__).parent / "config" / ".env"
 if _env_file.exists():
@@ -497,6 +503,8 @@ if "store_url"  not in st.session_state: st.session_state.store_url  = os.getenv
 if "import_log" not in st.session_state: st.session_state.import_log = []
 if "export_df"    not in st.session_state: st.session_state.export_df    = None
 if "bulk_results" not in st.session_state: st.session_state.bulk_results = None
+if "native_preview" not in st.session_state: st.session_state.native_preview = None
+if "native_results" not in st.session_state: st.session_state.native_results = None
 
 
 # ─────────────────────────────────────────────────────────
@@ -567,6 +575,9 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    st.markdown("---")
+    st.caption("Native fields: use **Update Native Fields** for a dry-run-gated CSV update of prices, product details, and other Shopify-native fields.")
+
 
 # ─────────────────────────────────────────────────────────
 # MAIN CONTENT
@@ -630,7 +641,7 @@ else:
 
 
 # ── Tabs ──────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)", "🛠️  Update Native Fields"])
 
 
 # ─────────────────────────────────────────────────────────
@@ -740,6 +751,84 @@ with tab1:
 
             st.success(f"✅ Done! {created} products created, {mf_ok} metafields set.")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# TAB 6 — NATIVE FIELD BULK UPDATE
+with tab6:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Update Native Shopify Fields</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-subtitle">Upload a Shopify CSV to preview and then apply native product and variant changes. Blank cells are never written.</div>', unsafe_allow_html=True)
+    st.warning("Price changes do not synchronise the Display Price metafield. Variant Weight Unit is ignored: Variant Grams is always sent as grams.")
+    native_file = st.file_uploader("Upload native-fields CSV", type=["csv"], key="native_file")
+    if native_file:
+        native_df = pd.read_csv(native_file, encoding="utf-8-sig")
+        native_df = native_df.loc[:, ~native_df.columns.astype(str).str.startswith("Unnamed")]
+        native_columns = recognised_native_columns(native_df.columns)
+        if not native_columns:
+            st.error("This CSV has no supported native field columns. Use fields such as Variant Price, Title, Tags, or Status.")
+        elif "Variant SKU" not in native_df.columns and "Handle" not in native_df.columns:
+            st.error("The CSV needs Variant SKU or Handle to identify each product.")
+        else:
+            st.caption("Recognised fields: " + ", ".join(native_columns))
+            limit = st.number_input("Limit to first N rows (0 = all rows)", min_value=0, value=0, step=1, key="native_limit")
+            rows = native_df.head(int(limit)).to_dict("records") if limit else native_df.to_dict("records")
+            metrics = st.columns(3)
+            metrics[0].metric("Rows to inspect", len(rows))
+            metrics[1].metric("Native columns", len(native_columns))
+            metrics[2].metric("Alias batch size", NATIVE_BATCH_SIZE)
+            if st.button("Create dry-run preview", key="native_preview_button"):
+                with st.spinner("Loading products and resolving CSV rows..."):
+                    cache = fetch_all_products(st.session_state.headers, st.session_state.store_url)
+                    sku_map, handle_map = build_lookup_index(cache)
+                    st.session_state.native_preview = resolve_rows(rows, sku_map, handle_map)
+                    st.session_state.native_results = None
+            preview = st.session_state.native_preview
+            if preview:
+                changed = [record for record in preview["diff_records"] if record["Changed"]]
+                unchanged = [record for record in preview["diff_records"] if not record["Changed"]]
+                summary = st.columns(4)
+                summary[0].metric("Would change", len(changed))
+                summary[1].metric("Unchanged", len(unchanged))
+                summary[2].metric("Not found", len(preview["notfound"]))
+                summary[3].metric("Invalid / skipped", len(preview["errors"]) + len(preview["skipped"]))
+                if preview["diff_records"]:
+                    st.dataframe(pd.DataFrame(preview["diff_records"]), use_container_width=True, height=320)
+                if preview["errors"]:
+                    st.error(f"{len(preview['errors'])} row(s) have invalid values and will not be sent.")
+                    st.dataframe(pd.DataFrame(preview["errors"]), use_container_width=True)
+                update_count = len(preview["variant_updates"]) + len(preview["product_updates"])
+                if update_count and st.button("Apply native field updates", type="primary", key="native_apply_button"):
+                    gql_url = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
+                    progress, status = st.progress(0), st.empty()
+                    successes, failures = [], []
+                    variant_groups = group_by_product(preview["variant_updates"])
+                    product_items = [(item["product_input"], item["meta"]) for item in preview["product_updates"]]
+                    work = [("variant", batch) for batch in chunk(variant_groups, NATIVE_BATCH_SIZE)]
+                    work += [("product", batch) for batch in chunk(product_items, NATIVE_BATCH_SIZE)]
+                    for index, (kind, batch) in enumerate(work, start=1):
+                        status.write(f"Sending batch {index} of {len(work)}...")
+                        if kind == "variant":
+                            query, variables = build_aliased_variant_mutation(batch)
+                            alias_metas = [group["metas"] for group in batch]
+                        else:
+                            query, variables = build_aliased_product_mutation([item[0] for item in batch])
+                            alias_metas = [[item[1]] for item in batch]
+                        ok, failed = send_native_batch(st.session_state.headers, gql_url, query, variables, alias_metas)
+                        successes.extend(ok)
+                        failures.extend(failed)
+                        progress.progress(index / len(work))
+                        time.sleep(0.5)
+                    st.session_state.native_results = {"success": successes, "failed": failures, "skipped": preview["skipped"], "notfound": preview["notfound"], "errors": preview["errors"]}
+                    status.success("Native-field update complete.")
+            results = st.session_state.native_results
+            if results:
+                for label, key in (("Successful", "success"), ("Failed", "failed"), ("Skipped", "skipped"), ("Not found", "notfound"), ("Invalid", "errors")):
+                    records = results[key]
+                    if records:
+                        frame = pd.DataFrame(records)
+                        with st.expander(f"{label} ({len(frame)})", expanded=key == "failed"):
+                            st.dataframe(frame, use_container_width=True, height=250)
+                            st.download_button(f"Download {label.lower()} rows", frame.to_csv(index=False).encode("utf-8"), f"native_{key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv", key=f"native_download_{key}")
     st.markdown('</div>', unsafe_allow_html=True)
 
 

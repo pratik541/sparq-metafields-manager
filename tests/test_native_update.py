@@ -152,6 +152,14 @@ class TestPassthrough:
 
 
 from native_update import build_product_input, build_variant_input
+from native_update import (
+    build_aliased_variant_mutation,
+    build_lookup_index,
+    current_value,
+    diff_row,
+    group_by_product,
+    resolve_rows,
+)
 
 VARIANT_GID = "gid://shopify/ProductVariant/111"
 PRODUCT_GID = "gid://shopify/Product/222"
@@ -245,3 +253,28 @@ class TestBuildProductInput:
         assert result is None
         assert len(errors) == 1
         assert "Status" in errors[0]
+
+
+class TestBatchingAndResolution:
+    def test_groups_variants_and_builds_aliases(self):
+        groups = group_by_product([
+            {"product_gid": "p1", "variant_input": {"id": "v1"}, "meta": {"SKU": "one"}},
+            {"product_gid": "p1", "variant_input": {"id": "v2"}, "meta": {"SKU": "two"}},
+        ])
+        assert groups[0]["variants"] == [{"id": "v1"}, {"id": "v2"}]
+        query, variables = build_aliased_variant_mutation(groups)
+        assert "m0: productVariantsBulkUpdate" in query
+        assert variables["v0"] == [{"id": "v1"}, {"id": "v2"}]
+
+    def test_diff_normalises_money_and_marks_unknown_current_changed(self):
+        variant = {"price": "287093.00"}
+        assert diff_row({"Variant Price": "287,093.00"}, variant, [])[0]["Changed"] is False
+        assert diff_row({"Cost per item": "10"}, variant, [])[0]["Changed"] is True
+        assert current_value("Cost per item", variant, {}) == "unknown"
+
+    def test_resolve_rows_buckets_native_updates(self):
+        products = [{"id": 2, "handle": "ring", "title": "Ring", "variants": [{"id": 1, "sku": "SKU-1", "price": "10"}]}]
+        sku_map, handle_map = build_lookup_index(products)
+        resolved = resolve_rows([{"Variant SKU": "SKU-1", "Variant Price": "12", "Title": "New Ring"}], sku_map, handle_map)
+        assert resolved["variant_updates"][0]["variant_input"]["price"] == "12"
+        assert resolved["product_updates"][0]["product_input"]["title"] == "New Ring"
