@@ -17,8 +17,9 @@ from native_update import (
     send_native_batch,
 )
 from guide_data import (
-    GUIDE_COLUMNS, GUIDE_ROWS, native_sample_rows,
+    GUIDE_COLUMNS, GUIDE_ROWS, compare_with_guide, native_sample_rows,
 )
+from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definitions
 
 _env_file = Path(__file__).parent / "config" / ".env"
 if _env_file.exists():
@@ -510,6 +511,8 @@ if "export_df"    not in st.session_state: st.session_state.export_df    = None
 if "bulk_results" not in st.session_state: st.session_state.bulk_results = None
 if "native_preview" not in st.session_state: st.session_state.native_preview = None
 if "native_results" not in st.session_state: st.session_state.native_results = None
+if "guide_definitions" not in st.session_state: st.session_state.guide_definitions = None
+if "guide_definitions_error" not in st.session_state: st.session_state.guide_definitions_error = None
 
 
 # ─────────────────────────────────────────────────────────
@@ -1659,11 +1662,68 @@ with tab7:
     st.dataframe(view, use_container_width=True, hide_index=True, height=460)
 
     st.markdown("---")
-    st.info(
-        "📄 **Sample CSVs live in the tab that uses them.** Open the "
-        "**📋 Expected CSV Format** section at the top of **🛠️ Update Native Fields**, "
-        "**🔄 Update Metafields**, or **⚡ Bulk Update** and download the sample from there."
+    st.markdown("**🔎 Your store's real metafield definitions**")
+    st.caption(
+        "The table above is a hand-written reference. This button reads the actual "
+        "definitions out of your store — authoritative Owner, key and type for every "
+        "metafield, including any this app does not know about."
     )
+
+    if not st.session_state.connected:
+        st.info("Connect to your store in the sidebar to use this.")
+    else:
+        if st.button("🔎 Load my metafield definitions", key="guide_load_definitions"):
+            with st.spinner("Reading metafield definitions from Shopify..."):
+                defs_rows, defs_error = fetch_metafield_definitions(
+                    st.session_state.headers, st.session_state.store_url
+                )
+            st.session_state.guide_definitions = defs_rows
+            st.session_state.guide_definitions_error = defs_error
+
+        if st.session_state.guide_definitions_error:
+            st.error(f"❌ {st.session_state.guide_definitions_error}")
+
+        if st.session_state.guide_definitions:
+            defs_df = pd.DataFrame(
+                st.session_state.guide_definitions, columns=DEFINITION_COLUMNS
+            )
+            st.success(
+                f"✅ {len(defs_df)} definitions found "
+                f"({(defs_df['Owner'] == 'product').sum()} product, "
+                f"{(defs_df['Owner'] == 'variant').sum()} variant). "
+                "Copy Owner, namespace, key and type straight into your CSV."
+            )
+            st.dataframe(defs_df, use_container_width=True, hide_index=True, height=420)
+            st.download_button(
+                "⬇️ Download my definitions as CSV",
+                data=defs_df.to_csv(index=False).encode("utf-8"),
+                file_name="my_metafield_definitions.csv",
+                mime="text/csv",
+                key="guide_dl_definitions"
+            )
+
+            # Where the hand-written table disagrees with the store, the store wins.
+            unlisted, mismatched = compare_with_guide(st.session_state.guide_definitions)
+
+            if mismatched:
+                st.error(
+                    f"⚠️ **{len(mismatched)} metafield(s) have a different type in your "
+                    "store than the reference table claims.** Trust your store, not the "
+                    "table — and tell me so I can correct the table."
+                )
+                st.dataframe(pd.DataFrame(mismatched), use_container_width=True,
+                             hide_index=True)
+
+            if unlisted:
+                st.warning(
+                    f"⚠️ **{len(unlisted)} metafield(s) exist in your store but are not in "
+                    "the reference table.** Use the values below, not the table."
+                )
+                st.dataframe(pd.DataFrame(unlisted), use_container_width=True,
+                             hide_index=True)
+
+            if not mismatched and not unlisted:
+                st.success("✅ The reference table above matches your store exactly.")
 
     st.markdown("---")
     st.markdown("""

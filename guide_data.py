@@ -22,9 +22,9 @@ GUIDE_ROWS = [
         "I want to change": "The displayed price (theme only, not checkout)",
         "Use this tab": "Update Metafields / Bulk Update",
         "Put this in your CSV": "custom.display_price",
-        "Kind": "Metafield",
-        "Type / allowed values": "Check the type in Shopify admin once, then reuse it",
-        "Example": "287093",
+        "Kind": "Metafield (variant level)",
+        "Type / allowed values": "money — Owner must be variant. Value is JSON, not a plain number",
+        "Example": '{"amount":"287093.00","currency_code":"INR"}',
     },
     {
         "I want to change": "The struck-through / MRP price",
@@ -282,6 +282,57 @@ GUIDE_COLUMNS = [
     "Type / allowed values",
     "Example",
 ]
+
+
+def guide_metafield_index():
+    """Guide rows that describe a metafield, keyed by 'namespace.key'."""
+    return {
+        row["Put this in your CSV"]: row
+        for row in GUIDE_ROWS
+        if row["Kind"].startswith("Metafield")
+    }
+
+
+def compare_with_guide(definition_rows):
+    """Check the hand-written guide against the store's real definitions.
+
+    Returns (unlisted, mismatched):
+      unlisted   — metafields the store has that the guide never mentions
+      mismatched — metafields where the guide's stated type does not appear in
+                   the real type, e.g. guide says single_line_text_field but the
+                   store says list.metaobject_reference
+
+    The store is always the authority; the guide is the thing that may be wrong.
+    """
+    index = guide_metafield_index()
+    unlisted = []
+    mismatched = []
+
+    for row in definition_rows:
+        full_key = f"{row['Metafield namespace']}.{row['Metafield Key']}"
+        real_type = (row.get("Metafield type") or "").strip()
+        guide_row = index.get(full_key)
+
+        if guide_row is None:
+            unlisted.append({
+                "Metafield": full_key,
+                "Owner": row.get("Owner", ""),
+                "Real type": real_type,
+            })
+            continue
+
+        # The guide's type cell is prose ("boolean — TRUE or FALSE"), so treat the
+        # real type as confirmed if it appears anywhere in that text.
+        guide_type_text = str(guide_row.get("Type / allowed values", "")).lower()
+        if real_type and real_type.lower() not in guide_type_text:
+            mismatched.append({
+                "Metafield": full_key,
+                "Owner": row.get("Owner", ""),
+                "Guide says": guide_row.get("Type / allowed values", ""),
+                "Store actually says": real_type,
+            })
+
+    return unlisted, mismatched
 
 
 def native_sample_rows():
