@@ -32,7 +32,7 @@ if _env_file.exists():
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title  = "Metafields Manager",
+    page_title  = "Shopify Bulk Editor",
     page_icon   = "💎",
     layout      = "wide",
     initial_sidebar_state = "expanded"
@@ -519,7 +519,7 @@ if "guide_definitions_error" not in st.session_state: st.session_state.guide_def
 # SIDEBAR — CREDENTIALS
 # ─────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 💎 Sparq Diamonds")
+    st.markdown("## 💎 Shopify Bulk Editor")
     st.markdown("### Store Connection")
     st.markdown("---")
 
@@ -596,8 +596,8 @@ st.markdown("""
 <div class="app-header">
     <div style="font-size:3rem">💎</div>
     <div>
-        <h1>Metafields Manager</h1>
-        <p>Import & Export product metafields for Sparq Diamonds · Powered by Shopify Admin API</p>
+        <h1>Shopify Bulk Editor</h1>
+        <p>Bulk edit metafields and native product fields · Powered by Shopify Admin API</p>
     </div>
 </div>
 """, unsafe_allow_html=True)

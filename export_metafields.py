@@ -204,7 +204,7 @@ def build_rows(product, metafields):
 # ─────────────────────────────────────────────────────────
 def run_export():
     print("=" * 60)
-    print("   SPARQ DIAMONDS — METAFIELDS EXPORT")
+    print("   SHOPIFY BULK EDITOR — METAFIELDS EXPORT")
     print("=" * 60)
 
     # Auth

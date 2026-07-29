@@ -280,7 +280,7 @@ def verify_metafield(headers, owner_type, owner_id, namespace, key, expected_val
 # ─────────────────────────────────────────────────────────
 def run_update():
     print("=" * 60)
-    print("   SPARQ DIAMONDS — METAFIELDS UPDATE")
+    print("   SHOPIFY BULK EDITOR — METAFIELDS UPDATE")
     print("=" * 60)
 
     # Auth

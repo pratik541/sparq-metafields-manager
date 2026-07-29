@@ -216,7 +216,7 @@ def set_metafields(headers, product_id, row, meta_cols):
 # ─────────────────────────────────────────────────────────
 def run_import():
     print("=" * 60)
-    print("   SPARQ DIAMONDS — METAFIELDS IMPORT")
+    print("   SHOPIFY BULK EDITOR — METAFIELDS IMPORT")
     print("=" * 60)
 
     # Auth

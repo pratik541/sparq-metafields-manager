@@ -163,7 +163,7 @@ def send_batch(headers, batch, batch_num, total_batches):
 # ─────────────────────────────────────────────────────────
 def run_bulk_update():
     print("=" * 60)
-    print("   SPARQ DIAMONDS — BULK METAFIELDS UPDATE (GraphQL)")
+    print("   SHOPIFY BULK EDITOR — METAFIELDS UPDATE (GraphQL)")
     print("=" * 60)
 
     token = get_access_token()
