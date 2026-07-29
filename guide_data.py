@@ -20,7 +20,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "The displayed price (theme only, not checkout)",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.display_price",
         "Kind": "Metafield (variant level)",
         "Type / allowed values": "money — Owner must be variant. Value is JSON, not a plain number",
@@ -61,7 +61,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "The extra product details block",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.product_details",
         "Kind": "Metafield",
         "Type / allowed values": "rich_text_field",
@@ -69,7 +69,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Details for one specific SKU only",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.prod_var_details",
         "Kind": "Metafield (variant level)",
         "Type / allowed values": "rich_text_field",
@@ -77,7 +77,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Badge / ribbon text on the product card",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.ribbon_text",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -86,7 +86,7 @@ GUIDE_ROWS = [
     # ── Social proof ──────────────────────────────────────────────────
     {
         "I want to change": "Star rating shown on the product",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.product_rating",
         "Kind": "Metafield",
         "Type / allowed values": "number_decimal",
@@ -94,7 +94,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Happy shoppers count",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.happy_shoppers",
         "Kind": "Metafield",
         "Type / allowed values": "number_integer (whole number)",
@@ -102,7 +102,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Loved by customers count",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "custom.loved_by_customers",
         "Kind": "Metafield",
         "Type / allowed values": "number_integer (whole number)",
@@ -218,7 +218,7 @@ GUIDE_ROWS = [
     # ── Shopify standard taxonomy metafields ──────────────────────────
     {
         "I want to change": "Jewellery type (Shopify category field)",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.jewelry-type",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -226,7 +226,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Jewellery material",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.jewelry-material",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -234,7 +234,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Earring design",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.earring-design",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -242,7 +242,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Colour",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.color-pattern",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -250,7 +250,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Target gender",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.target-gender",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -258,7 +258,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Age group",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "shopify.age-group",
         "Kind": "Metafield",
         "Type / allowed values": "single_line_text_field",
@@ -266,7 +266,7 @@ GUIDE_ROWS = [
     },
     {
         "I want to change": "Google Shopping custom product flag",
-        "Use this tab": "Update Metafields / Bulk Update",
+        "Use this tab": "Update Metafields",
         "Put this in your CSV": "mm-google-shopping.custom_product",
         "Kind": "Metafield",
         "Type / allowed values": "boolean — TRUE or FALSE",

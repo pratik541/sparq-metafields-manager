@@ -649,7 +649,7 @@ else:
 
 
 # ── Tabs ──────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "⚡  Bulk Update (40k+)", "🛠️  Update Native Fields", "📖  Guide"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥  Import Metafields", "📤  Export Metafields", "📋  View Products", "🔄  Update Metafields", "🛠️  Update Native Fields", "📖  Guide"])
 
 
 # ─────────────────────────────────────────────────────────
@@ -762,7 +762,7 @@ with tab1:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # TAB 6 — NATIVE FIELD BULK UPDATE
-with tab6:
+with tab5:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Update Native Shopify Fields</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-subtitle">Upload a Shopify CSV to preview and then apply native product and variant changes. Blank cells are never written.</div>', unsafe_allow_html=True)
@@ -1043,319 +1043,42 @@ with tab3:
 
 
 # ─────────────────────────────────────────────────────────
-# TAB 4 — UPDATE METAFIELDS
+# TAB 4 — UPDATE METAFIELDS  (GraphQL metafieldsSet, handles 40k+ rows)
 # ─────────────────────────────────────────────────────────
 with tab4:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Update Metafields by Handle / SKU</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-subtitle">Upload a targeted update CSV — finds each product by Handle or Variant SKU and creates or updates the specified metafield.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🔄 Update Metafields</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-subtitle">Upload a CSV to create or update metafields — finds each product by Handle or Variant SKU. Uses Shopify GraphQL <code>metafieldsSet</code>, 25 metafields per API call, so it handles anything from one row to 40,000+.</div>', unsafe_allow_html=True)
 
-    # Expected format info
     with st.expander("📋 Expected CSV Format", expanded=False):
         st.markdown("Your CSV must have these **7 columns** (exact names):")
-        sample_df = pd.DataFrame([
-            {
-                "Handle":              "",
-                "Variant SKU":         "SQT19349-EG-925S-0.8CT",
-                "Owner":               "variant",
-                "Metafield namespace": "custom",
-                "Metafield Key":       "prod_var_details",
-                "Metafield type":      "rich_text_field",
-                "Metafield Value":     "Diamond details here",
-            },
-            {
-                "Handle":              "",
-                "Variant SKU":         "SQT19349-EG-925S-0.8CT",
-                "Owner":               "product",
-                "Metafield namespace": "custom",
-                "Metafield Key":       "product_details",
-                "Metafield type":      "rich_text_field",
-                "Metafield Value":     "Product details here",
-            },
-        ])
-        st.dataframe(sample_df, use_container_width=True)
-        st.download_button(
-            "⬇️ Download this sample CSV",
-            data=sample_df.to_csv(index=False).encode("utf-8"),
-            file_name="sample_metafield_update.csv",
-            mime="text/csv",
-            key="update_sample_download"
-        )
-        st.markdown("""
-        **Owner column (controls which Shopify endpoint is used):**
-        - `variant` → `variants/{id}/metafields` — use for **prod_var_details**
-        - `product` → `products/{id}/metafields` — use for **product_details** and all product-level fields
-        - *(blank)* → auto: SKU present = variant, Handle only = product
-
-        **Match logic:**
-        - SKU present → finds the matching variant (and its parent product)
-        - SKU empty → finds product by Handle (exact match)
-        - If metafield already exists → **updates** it
-        - If metafield doesn't exist → **creates** it
-        """)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # File uploader
-    update_file = st.file_uploader("Upload Update CSV", type=["csv"], key="update_file")
-
-    if update_file:
-        df_update = pd.read_csv(update_file, encoding="utf-8-sig")
-        df_update = df_update.loc[:, ~df_update.columns.str.startswith("Unnamed")]
-
-        # Validate columns
-        required_cols = ["Handle", "Variant SKU", "Metafield namespace",
-                         "Metafield Key", "Metafield type", "Metafield Value"]
-        missing_cols  = [c for c in required_cols if c not in df_update.columns]
-
-        if missing_cols:
-            st.error(f"❌ Missing columns: {missing_cols}")
-            st.stop()
-
-        # Stats
-        col_u1, col_u2, col_u3 = st.columns(3)
-        col_u1.metric("Rows to Update",       len(df_update))
-        col_u2.metric("Unique Handles",        df_update["Handle"].nunique())
-        col_u3.metric("Unique Metafield Keys", df_update["Metafield Key"].nunique())
-
-        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-
-        # Preview
-        with st.expander("👁️ Preview Update Data", expanded=True):
-            st.dataframe(df_update, use_container_width=True)
-
-        # Show what metafields will be updated
-        st.markdown("**Metafields to be updated:**")
-        grouped = df_update.groupby(["Metafield namespace", "Metafield Key", "Metafield type"]).size().reset_index(name="count")
-        for _, grow in grouped.iterrows():
-            st.markdown(
-                f'<span class="badge badge-amber">{grow["Metafield namespace"]}.{grow["Metafield Key"]}</span>'
-                f'<span class="badge badge-blue">{grow["Metafield type"]}</span>'
-                f'<span class="badge badge-green">{grow["count"]} products</span>',
-                unsafe_allow_html=True
-            )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        if st.button("🔄 Start Update", key="btn_update"):
-
-            # Cache products
-            with st.spinner("Loading products from store..."):
-                products_cache = fetch_all_products(st.session_state.headers, st.session_state.store_url)
-
-            update_log  = st.empty()
-            update_prog = st.progress(0)
-            update_status = st.empty()
-
-            u_logs   = []
-            updated  = 0
-            ucreated = 0
-            failed   = 0
-            notfound = 0
-            total    = len(df_update)
-
-            def ulog(msg):
-                u_logs.append(msg)
-                log_html = "<br>".join(u_logs[-40:])
-                update_log.markdown(f'<div class="log-box">{log_html}</div>', unsafe_allow_html=True)
-
-            ulog(f"📦 {len(products_cache)} products loaded from store")
-            ulog(f"🚀 Starting update of {total} rows...")
-            ulog("─────────────────────────────────────")
-
-            for i, row in df_update.iterrows():
-                handle    = str(row.get("Handle","")).strip()
-                sku       = str(row.get("Variant SKU","")).strip()
-                namespace = str(row.get("Metafield namespace","")).strip()
-                key       = str(row.get("Metafield Key","")).strip()
-                mf_type   = str(row.get("Metafield type","")).strip()
-                owner_col = str(row.get("Owner","")).strip().lower()
-                value     = row.get("Metafield Value","")
-
-                update_prog.progress((i + 1) / total)
-                update_status.markdown(f"**Processing [{i+1}/{total}]:** `{sku}`")
-
-                ulog(f"")
-                ulog(f"[{i+1}/{total}] SKU: {sku} | Owner: {owner_col or 'auto'}")
-
-                # Skip empty
-                if pd.isna(value) or str(value).strip() == "":
-                    ulog(f"  ⏭️  Skipped — empty value")
-                    continue
-
-                # Owner column controls level explicitly:
-                #   Owner=variant  → variants/{variant_id}
-                #   Owner=product  → products/{product_id}
-                #   Owner missing  → SKU present=variant, else product
-                owner_type   = None
-                owner_id     = None
-                title        = ""
-                sku_clean    = sku.lower() not in ("", "nan", "none")
-                handle_clean = handle.lower() not in ("", "nan", "none")
-                wants_product = owner_col in ("product", "products")
-
-                if sku_clean:
-                    product_id_found = None
-                    variant_id_found = None
-                    for p in products_cache:
-                        for v in p.get("variants", []):
-                            if str(v.get("sku", "")).strip() == sku:
-                                product_id_found = p["id"]
-                                variant_id_found = v["id"]
-                                title = p.get("title", "")
-                                break
-                        if product_id_found:
-                            break
-                    if wants_product and product_id_found:
-                        owner_type = "products"
-                        owner_id   = product_id_found
-                        ulog(f"  📦 PRODUCT level (via SKU) → {title[:45]}")
-                    elif variant_id_found and not wants_product:
-                        owner_type = "variants"
-                        owner_id   = variant_id_found
-                        ulog(f"  🔩 VARIANT level → {title[:45]}")
-                    elif product_id_found:
-                        owner_type = "products"
-                        owner_id   = product_id_found
-                        ulog(f"  📦 PRODUCT level (fallback) → {title[:45]}")
-                    else:
-                        ulog(f"  ⚠️ SKU not found, trying handle...")
-
-                if not owner_id and handle_clean:
-                    for p in products_cache:
-                        if p.get("handle", "").strip() == handle:
-                            owner_type = "products"
-                            owner_id   = p["id"]
-                            title      = p.get("title", "")
-                            break
-                    if owner_id:
-                        ulog(f"  📦 PRODUCT → {title[:45]}")
-
-                if not owner_id:
-                    ulog(f"  ❌ NOT FOUND — handle: {handle[:40]}")
-                    notfound += 1
-                    continue
-
-                # Check if metafield already exists on this owner
-                mf_url    = f"https://{st.session_state.store_url}/admin/api/2025-01/{owner_type}/{owner_id}/metafields.json"
-                mf_resp   = requests.get(mf_url, headers=st.session_state.headers, timeout=60)
-                time.sleep(0.6)  # space out after GET to stay under Shopify 2 calls/sec limit
-                existing_id = None
-                if mf_resp.status_code == 200:
-                    for mf in mf_resp.json().get("metafields",[]):
-                        if mf["namespace"] == namespace and mf["key"] == key:
-                            existing_id = mf["id"]
-                            break
-
-                # Coerce value to correct string format for the given type
-                raw = str(value).strip().lstrip("'")
-                try:
-                    if mf_type == "number_integer":
-                        raw = str(int(float(raw)))
-                    elif mf_type == "number_decimal":
-                        raw = str(float(raw))
-                    elif mf_type == "boolean":
-                        raw = "true" if raw.lower() in ("true", "1", "yes") else "false"
-                    elif mf_type == "rich_text_field":
-                        try:
-                            parsed = json.loads(raw)
-                            already_rich = isinstance(parsed, dict) and parsed.get("type") == "root"
-                        except (json.JSONDecodeError, ValueError):
-                            already_rich = False
-                        if not already_rich:
-                            plain = re.sub(r"<[^>]+>", "", raw).strip()
-                            raw = json.dumps({
-                                "type": "root",
-                                "children": [{"type": "paragraph", "children": [{"type": "text", "value": plain}]}]
-                            })
-                except (ValueError, TypeError):
-                    pass
-
-                payload = {"metafield": {
-                    "namespace": namespace, "key": key,
-                    "value": raw, "type": mf_type
-                }}
-
-                if existing_id:
-                    # UPDATE — retry once on 429 rate limit
-                    resp = requests.put(
-                        f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
-                        headers=st.session_state.headers, json=payload, timeout=60
-                    )
-                    if resp.status_code == 429:
-                        ulog(f"  ⏳ Rate limited — waiting 3s before retry...")
-                        time.sleep(3)
-                        resp = requests.put(
-                            f"https://{st.session_state.store_url}/admin/api/2025-01/metafields/{existing_id}.json",
-                            headers=st.session_state.headers, json=payload, timeout=60
-                        )
-                    if resp.status_code == 200:
-                        ulog(f"  🔄 UPDATED → {namespace}.{key} = {str(value)[:40]}")
-                        updated += 1
-                    else:
-                        ulog(f"  ❌ Update failed: {resp.text[:80]}")
-                        failed += 1
-                else:
-                    # CREATE — retry once on 429 rate limit
-                    resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=60)
-                    if resp.status_code == 429:
-                        ulog(f"  ⏳ Rate limited — waiting 3s before retry...")
-                        time.sleep(3)
-                        resp = requests.post(mf_url, headers=st.session_state.headers, json=payload, timeout=60)
-                    if resp.status_code == 201:
-                        ulog(f"  ✨ CREATED → {namespace}.{key} = {str(value)[:40]}")
-                        ucreated += 1
-                    else:
-                        ulog(f"  ❌ Create failed: {resp.text[:80]}")
-                        failed += 1
-
-                time.sleep(0.6)
-
-            update_prog.progress(1.0)
-            update_status.markdown("**✅ Update complete!**")
-            ulog("")
-            ulog("─────────────────────────────────────")
-            ulog(f"🔄 Metafields updated  : {updated}")
-            ulog(f"✨ Metafields created  : {ucreated}")
-            ulog(f"❌ Failed              : {failed}")
-            ulog(f"🔍 Products not found  : {notfound}")
-            ulog("─────────────────────────────────────")
-
-            # Summary cards
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("🔄 Updated",   updated)
-            c2.metric("✨ Created",   ucreated)
-            c3.metric("❌ Failed",    failed)
-            c4.metric("🔍 Not Found", notfound)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────
-# TAB 5 — BULK UPDATE  (GraphQL metafieldsSet, 40k+ rows)
-# ─────────────────────────────────────────────────────────
-with tab5:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">⚡ Bulk Update Metafields</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-subtitle">Uses Shopify GraphQL <code>metafieldsSet</code> — 25 metafields per API call. Recommended for 1,000+ rows. The regular Update tab is still available as fallback.</div>', unsafe_allow_html=True)
-
-    with st.expander("📋 CSV Format (same as Update tab)", expanded=False):
         bulk_sample = pd.DataFrame([
-            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "variant", "Metafield namespace": "custom", "Metafield Key": "prod_var_details",  "Metafield type": "rich_text_field", "Metafield Value": "Diamond details"},
-            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "product", "Metafield namespace": "custom", "Metafield Key": "product_details",   "Metafield type": "rich_text_field", "Metafield Value": "Product details"},
+            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "variant", "Metafield namespace": "custom", "Metafield Key": "prod_var_details",  "Metafield type": "rich_text_field", "Metafield Value": "Diamond details here"},
+            {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "product", "Metafield namespace": "custom", "Metafield Key": "product_details",   "Metafield type": "rich_text_field", "Metafield Value": "Product details here"},
         ])
         st.dataframe(bulk_sample, use_container_width=True)
         st.download_button(
             "⬇️ Download this sample CSV",
             data=bulk_sample.to_csv(index=False).encode("utf-8"),
-            file_name="sample_metafield_bulk_update.csv",
+            file_name="sample_metafield_update.csv",
             mime="text/csv",
             key="bulk_sample_download"
         )
         st.markdown("""
-        - `Owner=variant` → `gid://shopify/ProductVariant/{id}`
-        - `Owner=product` → `gid://shopify/Product/{id}`
-        - blank Owner → auto (SKU present = variant, Handle only = product)
+        **Owner column (controls which record the metafield is attached to):**
+        - `variant` → `gid://shopify/ProductVariant/{id}` — use for **prod_var_details**
+          and **display_price**
+        - `product` → `gid://shopify/Product/{id}` — use for **product_details** and all
+          product-level fields
+        - *(blank)* → auto: SKU present = variant, Handle only = product
+
+        **Match logic:**
+        - SKU present → finds the matching variant (and its parent product)
+        - SKU empty → finds product by Handle (exact match)
+        - If the metafield already exists → **updates** it
+        - If it doesn't exist → **creates** it
+
+        Not sure which namespace, key or type to use? See the **📖 Guide** tab.
         """)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1388,7 +1111,7 @@ with tab5:
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            if st.button("⚡ Start Bulk Update", key="btn_bulk"):
+            if st.button("🔄 Start Metafield Update", key="btn_bulk"):
                 st.session_state.bulk_results = None  # reset previous run
 
                 with st.spinner("Loading products from store..."):
@@ -1662,9 +1385,9 @@ with tab5:
 
 
 # ─────────────────────────────────────────────────────────
-# TAB 7 — GUIDE (what to put in your CSV)
+# TAB 6 — GUIDE (what to put in your CSV)
 # ─────────────────────────────────────────────────────────
-with tab7:
+with tab6:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">📖 Guide — what do I put in my CSV?</div>', unsafe_allow_html=True)
     st.markdown(
