@@ -306,36 +306,3 @@ def native_sample_rows():
             "Status": "ACTIVE",
         },
     ]
-
-
-def metafield_sample_rows():
-    """Sample rows for a metafield update CSV, ready to edit and upload."""
-    return [
-        {
-            "Handle": "",
-            "Variant SKU": "SPLDT19906-14KY-4.91CT",
-            "Owner": "product",
-            "Metafield namespace": "custom",
-            "Metafield Key": "product_rating",
-            "Metafield type": "number_decimal",
-            "Metafield Value": "4.5",
-        },
-        {
-            "Handle": "",
-            "Variant SKU": "SPLDT19906-14KY-4.91CT",
-            "Owner": "variant",
-            "Metafield namespace": "custom",
-            "Metafield Key": "prod_var_details",
-            "Metafield type": "rich_text_field",
-            "Metafield Value": "4.91 CT, VVS clarity",
-        },
-        {
-            "Handle": "arias-linear-diamond-earrings",
-            "Variant SKU": "",
-            "Owner": "product",
-            "Metafield namespace": "custom",
-            "Metafield Key": "ribbon_text",
-            "Metafield type": "single_line_text_field",
-            "Metafield Value": "Best Seller",
-        },
-    ]

@@ -9,13 +9,15 @@ import io
 from datetime import datetime
 from pathlib import Path
 from native_update import (
-    NATIVE_BATCH_SIZE, build_aliased_product_mutation,
+    CLEARABLE_COLUMNS, INVENTORY_POLICIES, NATIVE_BATCH_SIZE,
+    NATIVE_PRODUCT_FIELDS, NATIVE_VARIANT_FIELDS, PRODUCT_STATUSES,
+    build_aliased_product_mutation,
     build_aliased_variant_mutation, build_lookup_index, chunk,
     group_by_product, recognised_native_columns, resolve_rows,
     send_native_batch,
 )
 from guide_data import (
-    GUIDE_COLUMNS, GUIDE_ROWS, metafield_sample_rows, native_sample_rows,
+    GUIDE_COLUMNS, GUIDE_ROWS, native_sample_rows,
 )
 
 _env_file = Path(__file__).parent / "config" / ".env"
@@ -762,6 +764,39 @@ with tab6:
     st.markdown('<div class="section-title">Update Native Shopify Fields</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-subtitle">Upload a Shopify CSV to preview and then apply native product and variant changes. Blank cells are never written.</div>', unsafe_allow_html=True)
     st.warning("Price changes do not synchronise the Display Price metafield. Variant Weight Unit is ignored: Variant Grams is always sent as grams.")
+
+    with st.expander("📋 Expected CSV Format", expanded=False):
+        st.markdown(
+            "Your CSV needs **`Variant SKU`** (preferred) or **`Handle`** to identify each product, "
+            "plus any of the supported field columns. Include only the columns you want to change:"
+        )
+        native_sample_df = pd.DataFrame(native_sample_rows())
+        st.dataframe(native_sample_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Download this sample CSV",
+            data=native_sample_df.to_csv(index=False).encode("utf-8"),
+            file_name="sample_native_fields.csv",
+            mime="text/csv",
+            key="native_sample_download"
+        )
+        st.markdown(f"""
+        **Variant-level columns:** {", ".join(f"`{c}`" for c in NATIVE_VARIANT_FIELDS)}
+
+        **Product-level columns:** {", ".join(f"`{c}`" for c in NATIVE_PRODUCT_FIELDS)}
+
+        **Rules:**
+        - A **blank cell changes nothing** — Shopify keeps its current value. Delete the whole
+          column if you are not changing that field.
+        - To empty a value on purpose, type `CLEAR` (works for
+          {", ".join(f"`{c}`" for c in sorted(CLEARABLE_COLUMNS))}).
+        - `Variant Inventory Policy`: {" or ".join(f"`{v}`" for v in INVENTORY_POLICIES)}.
+          `Status`: {", ".join(f"`{v}`" for v in PRODUCT_STATUSES)}.
+        - `Variant Grams` is always grams; `Variant Weight Unit` is ignored.
+        - Inventory **quantity** is not supported here — change it in Shopify admin.
+
+        Not sure which column to use? See the **📖 Guide** tab.
+        """)
+
     native_file = st.file_uploader("Upload native-fields CSV", type=["csv"], key="native_file")
     if native_file:
         native_df = pd.read_csv(native_file, encoding="utf-8-sig")
@@ -1003,6 +1038,13 @@ with tab4:
             },
         ])
         st.dataframe(sample_df, use_container_width=True)
+        st.download_button(
+            "⬇️ Download this sample CSV",
+            data=sample_df.to_csv(index=False).encode("utf-8"),
+            file_name="sample_metafield_update.csv",
+            mime="text/csv",
+            key="update_sample_download"
+        )
         st.markdown("""
         **Owner column (controls which Shopify endpoint is used):**
         - `variant` → `variants/{id}/metafields` — use for **prod_var_details**
@@ -1267,6 +1309,13 @@ with tab5:
             {"Handle": "", "Variant SKU": "SQT19349-EG-925S-0.8CT",  "Owner": "product", "Metafield namespace": "custom", "Metafield Key": "product_details",   "Metafield type": "rich_text_field", "Metafield Value": "Product details"},
         ])
         st.dataframe(bulk_sample, use_container_width=True)
+        st.download_button(
+            "⬇️ Download this sample CSV",
+            data=bulk_sample.to_csv(index=False).encode("utf-8"),
+            file_name="sample_metafield_bulk_update.csv",
+            mime="text/csv",
+            key="bulk_sample_download"
+        )
         st.markdown("""
         - `Owner=variant` → `gid://shopify/ProductVariant/{id}`
         - `Owner=product` → `gid://shopify/Product/{id}`
@@ -1610,24 +1659,10 @@ with tab7:
     st.dataframe(view, use_container_width=True, hide_index=True, height=460)
 
     st.markdown("---")
-    st.markdown("**Sample CSVs — download, edit, upload**")
-
-    s1, s2 = st.columns(2)
-    s1.download_button(
-        "⬇️ Native fields sample CSV",
-        data=pd.DataFrame(native_sample_rows()).to_csv(index=False).encode("utf-8"),
-        file_name="sample_native_fields.csv",
-        mime="text/csv",
-        key="guide_dl_native",
-        help="Upload this in the Update Native Fields tab"
-    )
-    s2.download_button(
-        "⬇️ Metafield update sample CSV",
-        data=pd.DataFrame(metafield_sample_rows()).to_csv(index=False).encode("utf-8"),
-        file_name="sample_metafield_update.csv",
-        mime="text/csv",
-        key="guide_dl_metafield",
-        help="Upload this in the Update Metafields or Bulk Update tab"
+    st.info(
+        "📄 **Sample CSVs live in the tab that uses them.** Open the "
+        "**📋 Expected CSV Format** section at the top of **🛠️ Update Native Fields**, "
+        "**🔄 Update Metafields**, or **⚡ Bulk Update** and download the sample from there."
     )
 
     st.markdown("---")
