@@ -2,6 +2,7 @@ requests
 pandas
 openpyxl
 streamlit
+starlette<1.4.0
 pytest
 streamlit
 pytest
