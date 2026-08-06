@@ -20,6 +20,7 @@ from guide_data import (
     GUIDE_COLUMNS, GUIDE_ROWS, compare_with_guide, native_sample_rows,
 )
 from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definitions
+from metafield_export import batch_size_for, build_aliased_metafields_query, fetch_metafields_bulk
 from eta import format_duration, progress_line, upfront_estimate_seconds
 
 _env_file = Path(__file__).parent / "config" / ".env"
@@ -233,7 +234,25 @@ METAFIELD_MAP = {
     ("shopify",            "target-gender")     : "Target gender (product.metafields.shopify.target-gender)",
 }
 
-TEMPLATE_COLS = [
+# The "Google Shopping / ..." template columns are metafields under Shopify's
+# Google & YouTube channel namespace, not native product/variant fields.
+# Always fetched regardless of the export tab's column picker, same as any
+# other base template column (Handle, Title, ...).
+GOOGLE_SHOPPING_KEYS = {
+    "Google Shopping / Google Product Category": ("mm-google-shopping", "google_product_category"),
+    "Google Shopping / Gender":                  ("mm-google-shopping", "gender"),
+    "Google Shopping / Age Group":               ("mm-google-shopping", "age_group"),
+    "Google Shopping / MPN":                     ("mm-google-shopping", "mpn"),
+    "Google Shopping / Condition":                ("mm-google-shopping", "condition"),
+    "Google Shopping / Custom Product":          ("mm-google-shopping", "custom_product"),
+    "Google Shopping / Custom Label 0":           ("mm-google-shopping", "custom_label_0"),
+    "Google Shopping / Custom Label 1":           ("mm-google-shopping", "custom_label_1"),
+    "Google Shopping / Custom Label 2":           ("mm-google-shopping", "custom_label_2"),
+    "Google Shopping / Custom Label 3":           ("mm-google-shopping", "custom_label_3"),
+    "Google Shopping / Custom Label 4":           ("mm-google-shopping", "custom_label_4"),
+}
+
+TEMPLATE_COLS_PRE_METAFIELDS = [
     "Handle","Title","Body (HTML)","Vendor","Product Category","Type","Tags",
     "Published","Option1 Name","Option1 Value","Option1 Linked To",
     "Option2 Name","Option2 Value","Option2 Linked To",
@@ -251,18 +270,9 @@ TEMPLATE_COLS = [
     "Google Shopping / Custom Label 0","Google Shopping / Custom Label 1",
     "Google Shopping / Custom Label 2","Google Shopping / Custom Label 3",
     "Google Shopping / Custom Label 4",
-    "Happy Shoppers (product.metafields.custom.happy_shoppers)",
-    "Loved By Customers (product.metafields.custom.loved_by_customers)",
-    "Product Rating (product.metafields.custom.product_rating)",
-    "Ribbon Text (product.metafields.custom.ribbon_text)",
-    "Product Variant Details (product.metafields.custom.prod_var_details)",
-    "Google: Custom Product (product.metafields.mm-google-shopping.custom_product)",
-    "Age group (product.metafields.shopify.age-group)",
-    "Color (product.metafields.shopify.color-pattern)",
-    "Earring design (product.metafields.shopify.earring-design)",
-    "Jewelry material (product.metafields.shopify.jewelry-material)",
-    "Jewelry type (product.metafields.shopify.jewelry-type)",
-    "Target gender (product.metafields.shopify.target-gender)",
+]
+
+TEMPLATE_COLS_POST_METAFIELDS = [
     "Variant Image","Variant Weight Unit","Variant Tax Code","Cost per item","Status",
 ]
 
@@ -444,47 +454,81 @@ def parse_metafield_columns(df_columns):
     return meta_cols
 
 
-def build_export_rows(product, metafields):
+def metafield_map_from_definitions(defs_rows):
+    """Turn fetched product metafield definitions into a (ns, key) -> CSV column name map.
+
+    Only PRODUCT-owned definitions apply here — this export has one row per
+    product, so variant-level metafields don't fit its columns. Keys already
+    covered by GOOGLE_SHOPPING_KEYS are skipped too — those get their own
+    always-included template column, so keeping them here would just add a
+    second, differently-named column for the same underlying metafield.
+    """
+    google_shopping_pairs = set(GOOGLE_SHOPPING_KEYS.values())
+    metafield_map = {}
+    for d in defs_rows:
+        if d.get("Owner") != "product":
+            continue
+        ns, key = d.get("Metafield namespace", ""), d.get("Metafield Key", "")
+        if not ns or not key or (ns, key) in google_shopping_pairs:
+            continue
+        name = d.get("Name") or key
+        metafield_map[(ns, key)] = f"{name} (product.metafields.{ns}.{key})"
+    return metafield_map
+
+
+def build_export_rows(product, metafields, metafield_map=None):
+    if metafield_map is None:
+        metafield_map = METAFIELD_MAP
     mf_lookup = {(mf["namespace"], mf["key"]): mf["value"] for mf in metafields}
     variant   = product["variants"][0] if product.get("variants") else {}
     images    = sorted(product.get("images", []), key=lambda x: x.get("position", 99))
     rows      = []
 
+    options = product.get("options") or []
+
     main = {
         "Handle": product.get("handle",""), "Title": product.get("title",""),
         "Body (HTML)": product.get("body_html",""), "Vendor": product.get("vendor",""),
         "Product Category": product.get("product_type",""), "Type": product.get("product_type",""),
-        "Tags": product.get("tags",""), "Published": "TRUE",
-        "Option1 Name": product["options"][0]["name"] if product.get("options") else "Title",
+        "Tags": product.get("tags",""),
+        "Published": str(product.get("published_at") is not None).upper(),
+        "Option1 Name": options[0]["name"] if options else "Title",
         "Option1 Value": variant.get("option1","Default Title"), "Option1 Linked To": "",
-        "Option2 Name": "", "Option2 Value": "", "Option2 Linked To": "",
-        "Option3 Name": "", "Option3 Value": "", "Option3 Linked To": "",
+        "Option2 Name": options[1]["name"] if len(options) > 1 else "",
+        "Option2 Value": variant.get("option2",""), "Option2 Linked To": "",
+        "Option3 Name": options[2]["name"] if len(options) > 2 else "",
+        "Option3 Value": variant.get("option3",""), "Option3 Linked To": "",
         "Variant SKU": variant.get("sku",""), "Variant Grams": variant.get("grams",0),
         "Variant Inventory Tracker": variant.get("inventory_management",""),
         "Variant Inventory Qty": variant.get("inventory_quantity",0),
         "Variant Inventory Policy": variant.get("inventory_policy","deny"),
         "Variant Fulfillment Service": variant.get("fulfillment_service","manual"),
         "Variant Price": variant.get("price",""), "Variant Compare At Price": variant.get("compare_at_price",""),
-        "Variant Requires Shipping": "TRUE", "Variant Taxable": "TRUE",
+        "Variant Requires Shipping": str(variant.get("requires_shipping", True)).upper(),
+        "Variant Taxable": str(variant.get("taxable", True)).upper(),
         "Unit Price Total Measure": "", "Unit Price Total Measure Unit": "",
         "Unit Price Base Measure": "", "Unit Price Base Measure Unit": "",
         "Variant Barcode": variant.get("barcode",""),
         "Image Src": images[0]["src"] if images else "",
         "Image Position": images[0]["position"] if images else "",
         "Image Alt Text": images[0].get("alt","") if images else "",
-        "Gift Card": "FALSE", "SEO Title": "", "SEO Description": "",
-        "Google Shopping / Google Product Category": "",
-        "Google Shopping / Gender": "", "Google Shopping / Age Group": "",
-        "Google Shopping / MPN": "", "Google Shopping / Condition": "",
-        "Google Shopping / Custom Product": "",
-        "Google Shopping / Custom Label 0": "", "Google Shopping / Custom Label 1": "",
-        "Google Shopping / Custom Label 2": "", "Google Shopping / Custom Label 3": "",
-        "Google Shopping / Custom Label 4": "",
-        "Variant Image": "", "Variant Weight Unit": variant.get("weight_unit","kg"),
+        # Gift Card, Variant Tax Code and Cost per item aren't in the REST
+        # products.json payload at all (gift-card status is GraphQL-only;
+        # tax code and cost live on a separate InventoryItem lookup) — always
+        # blank until this export makes those extra calls.
+        "Gift Card": "FALSE",
+        # metafields_global_*_tag are the legacy SEO fields Shopify still
+        # returns on the product object for stores that set them via the
+        # old admin UI; harmless "" fallback for stores that never did.
+        "SEO Title": product.get("metafields_global_title_tag") or "",
+        "SEO Description": product.get("metafields_global_description_tag") or "",
+        "Variant Image": variant.get("image_id",""), "Variant Weight Unit": variant.get("weight_unit","kg"),
         "Variant Tax Code": "", "Cost per item": "",
         "Status": product.get("status","active"),
     }
-    for (ns, key), col_name in METAFIELD_MAP.items():
+    for col_name, (ns, key) in GOOGLE_SHOPPING_KEYS.items():
+        main[col_name] = mf_lookup.get((ns, key), "")
+    for (ns, key), col_name in metafield_map.items():
         main[col_name] = mf_lookup.get((ns, key), "")
 
     rows.append(main)
@@ -514,6 +558,35 @@ if "native_preview" not in st.session_state: st.session_state.native_preview = N
 if "native_results" not in st.session_state: st.session_state.native_results = None
 if "guide_definitions" not in st.session_state: st.session_state.guide_definitions = None
 if "guide_definitions_error" not in st.session_state: st.session_state.guide_definitions_error = None
+if "export_metafield_defs" not in st.session_state: st.session_state.export_metafield_defs = None
+if "export_metafield_defs_error" not in st.session_state: st.session_state.export_metafield_defs_error = None
+if "products" not in st.session_state: st.session_state.products = None
+
+
+def refresh_products():
+    """(Re)load the product list into session state.
+
+    Fetching all products is a paginated REST call that can take several
+    seconds on a large catalog. Streamlit reruns this whole script on every
+    widget interaction, so this must only be called from explicit actions
+    (connect, a refresh button) — never unconditionally at the top level,
+    or every click would re-fetch the entire catalog.
+    """
+    with st.spinner("Loading products from store..."):
+        try:
+            st.session_state.products = fetch_all_products(
+                st.session_state.headers, st.session_state.store_url
+            )
+        except requests.exceptions.Timeout:
+            st.warning("⚠️ Store connection timed out. Check your network and try reconnecting.")
+            st.session_state.connected = False
+            st.session_state.token = None
+            st.session_state.products = []
+        except requests.exceptions.ConnectionError:
+            st.warning("⚠️ Cannot reach the store. Check your Store URL.")
+            st.session_state.connected = False
+            st.session_state.token = None
+            st.session_state.products = []
 
 
 # ─────────────────────────────────────────────────────────
@@ -540,6 +613,12 @@ with st.sidebar:
                     "X-Shopify-Access-Token": token,
                     "Content-Type": "application/json"
                 }
+                # Clear anything cached from a previous connection (possibly a
+                # different store) so the Export tab re-reads fresh definitions
+                # instead of quietly reusing the last store's metafield list.
+                st.session_state.export_metafield_defs       = None
+                st.session_state.export_metafield_defs_error = None
+                refresh_products()
                 st.success("✅ Connected!")
             else:
                 st.error(f"❌ {err}")
@@ -605,19 +684,21 @@ st.markdown("""
 
 
 # ── Stats row ─────────────────────────────────────────────
-products = []
+# products is cached in session state at connect time and only re-fetched
+# when the user asks (refresh_products()) — not on every rerun, since
+# Streamlit reruns this script on every widget interaction.
+if st.session_state.connected and st.session_state.products is None:
+    refresh_products()
+
+products = (st.session_state.products or []) if st.session_state.connected else []
+
 if st.session_state.connected:
-    with st.spinner("Loading store stats..."):
-        try:
-            products = fetch_all_products(st.session_state.headers, st.session_state.store_url)
-        except requests.exceptions.Timeout:
-            st.warning("⚠️ Store connection timed out. Check your network and try reconnecting.")
-            st.session_state.connected = False
-            st.session_state.token = None
-        except requests.exceptions.ConnectionError:
-            st.warning("⚠️ Cannot reach the store. Check your Store URL.")
-            st.session_state.connected = False
-            st.session_state.token = None
+    _, refresh_col = st.columns([5, 1])
+    with refresh_col:
+        if st.button("🔄 Refresh products", key="refresh_products_btn",
+                     help="Re-fetch the product list from Shopify"):
+            refresh_products()
+            st.rerun()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -955,51 +1036,158 @@ with tab2:
         - ✅ All product details (title, description, vendor, tags)
         - ✅ Variant data (SKU, price, inventory)
         - ✅ All product images (multiple rows per product)
-        - ✅ All 11 metafield columns
+        - ✅ Whichever metafield columns you pick below
         - ✅ Same column format as your import template
         """)
+
+    st.markdown("---")
+
+    # ── Load available metafield columns (cached for the session) ──
+    # A freshly (re)loaded definitions list resets the picker to "select
+    # all" — st.multiselect only honors `default` the first time a given
+    # `key` is used, so without this, newly discovered metafields (after a
+    # refresh, or a new store) would silently stay unchecked instead of
+    # being included.
+    just_loaded = (st.session_state.export_metafield_defs is None
+                  and st.session_state.export_metafield_defs_error is None)
+    if just_loaded:
+        with st.spinner("Reading metafield definitions from Shopify..."):
+            defs_rows, defs_error = fetch_metafield_definitions(
+                st.session_state.headers, st.session_state.store_url
+            )
+        st.session_state.export_metafield_defs       = defs_rows
+        st.session_state.export_metafield_defs_error = defs_error
+
+    if st.session_state.export_metafield_defs_error:
+        st.warning(
+            f"⚠️ Could not load live metafield definitions "
+            f"({st.session_state.export_metafield_defs_error}) — using the built-in metafield list."
+        )
+        full_metafield_map = METAFIELD_MAP
+    else:
+        full_metafield_map = metafield_map_from_definitions(st.session_state.export_metafield_defs)
+
+    all_metafield_cols = list(full_metafield_map.values())
+    if just_loaded:
+        st.session_state.export_metafield_cols = all_metafield_cols
+
+    col_pick, col_refresh = st.columns([4, 1])
+    with col_pick:
+        selected_metafield_cols = st.multiselect(
+            "Metafield columns to include",
+            options     = all_metafield_cols,
+            default     = all_metafield_cols,
+            key         = "export_metafield_cols",
+            help        = "Product/variant fields (Handle, Title, Vendor, prices, images...) are always "
+                          "included — this only controls which metafield columns are added.",
+        )
+    with col_refresh:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", key="export_refresh_defs",
+                     help="Re-read metafield definitions from your store"):
+            st.session_state.export_metafield_defs       = None
+            st.session_state.export_metafield_defs_error = None
+            st.rerun()
+
+    metafield_map  = {k: v for k, v in full_metafield_map.items() if v in selected_metafield_cols}
+    metafield_cols = list(metafield_map.values())
+
+    # Google Shopping columns are always-included template columns (like
+    # Handle or Title), not part of the picker, but they're metafields under
+    # the hood — so they must always be in the fetch's `keys` filter too, or
+    # the GraphQL request will never ask Shopify for them.
+    selected_keys = sorted({f"{ns}.{key}" for (ns, key) in metafield_map.keys()}
+                          | {f"{ns}.{key}" for (ns, key) in GOOGLE_SHOPPING_KEYS.values()})
+
+    # ── Time estimate — same live-throughput pattern as the update tabs ──
+    product_ids       = [p["id"] for p in products]
+    export_batch_size = batch_size_for(len(selected_keys)) if selected_keys else 0
+    export_batches    = chunk(product_ids, export_batch_size) if selected_keys and product_ids else []
+
+    if products:
+        plan_cols = st.columns(3)
+        plan_cols[0].metric("Products to export", len(products))
+        plan_cols[1].metric(
+            f"Metafield requests ({export_batch_size or '—'}/request)", len(export_batches)
+        )
+        plan_cols[2].metric(
+            "Estimated Time", f"~{format_duration(upfront_estimate_seconds(len(export_batches)))}"
+        )
+        st.caption(
+            "The estimate is refined from real throughput once the run starts. "
+            "Selecting fewer metafield columns fetches faster."
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     if st.button("📤 Export to CSV", use_container_width=False):
-        export_log  = st.empty()
-        export_prog = st.progress(0)
-        all_rows    = []
-        logs        = []
+        export_log    = st.empty()
+        export_prog   = st.progress(0)
+        export_status = st.empty()
+        all_rows      = []
+        logs          = []
 
         def elog(msg):
             logs.append(msg)
             log_html = "<br>".join(logs[-30:])
             export_log.markdown(f'<div class="log-box">{log_html}</div>', unsafe_allow_html=True)
 
-        elog(f"📦 Fetching metafields for {len(products)} products...")
+        elog(f"✅ Using {len(metafield_map)} selected metafield column(s)")
+
+        mf_by_id  = {}
+        run_start = time.time()
+
+        if not selected_keys:
+            elog("ℹ️ No metafield columns selected — skipping metafield fetch entirely")
+        else:
+            elog(f"📦 Fetching metafields for {len(products)} products "
+                 f"in {len(export_batches)} GraphQL batch(es)...")
+
+            for b, batch_ids in enumerate(export_batches):
+                export_status.markdown(
+                    f"**Sending request {b+1}/{len(export_batches)}**  \n"
+                    + progress_line(time.time() - run_start, b, len(export_batches), noun="Request")
+                )
+                batch_result, batch_error = fetch_metafields_bulk(
+                    st.session_state.headers, st.session_state.store_url,
+                    batch_ids, keys=selected_keys,
+                )
+                if batch_error:
+                    elog(f"⚠️ Batch {b+1}/{len(export_batches)} failed ({batch_error}) "
+                         f"— falling back to one-by-one fetch for these products")
+                    for pid in batch_ids:
+                        mf_by_id[pid] = fetch_metafields(st.session_state.headers, st.session_state.store_url, pid)
+                else:
+                    mf_by_id.update(batch_result)
+                export_prog.progress((b + 1) / len(export_batches))
+
+        elog(f"✅ Metafields fetched — building {len(products)} product row(s)...")
 
         for i, product in enumerate(products):
-            title = product.get("title","")[:50]
-            elog(f"[{i+1}/{len(products)}] {title}")
-            export_prog.progress((i + 1) / len(products))
-
-            metafields = fetch_metafields(st.session_state.headers, st.session_state.store_url, product["id"])
-            rows       = build_export_rows(product, metafields)
+            title      = product.get("title","")[:50]
+            metafields = mf_by_id.get(product["id"], [])
+            rows       = build_export_rows(product, metafields, metafield_map)
             all_rows.extend(rows)
 
             found_keys = {(mf["namespace"], mf["key"]) for mf in metafields}
-            for (ns, key) in METAFIELD_MAP.keys():
+            for (ns, key) in metafield_map.keys():
                 if (ns, key) in found_keys:
-                    elog(f"  ✅ {ns}.{key}")
-            time.sleep(0.25)
+                    elog(f"  ✅ [{i+1}/{len(products)}] {title} — {ns}.{key}")
 
         export_prog.progress(1.0)
 
         # Build DataFrame
         df_export  = pd.DataFrame(all_rows)
-        final_cols = [c for c in TEMPLATE_COLS if c in df_export.columns]
+        template_cols = TEMPLATE_COLS_PRE_METAFIELDS + metafield_cols + TEMPLATE_COLS_POST_METAFIELDS
+        final_cols = [c for c in template_cols if c in df_export.columns]
         df_export  = df_export[final_cols]
 
         st.session_state.export_df = df_export
 
         elog(f"")
-        elog(f"✅ Export complete! {len(products)} products, {len(all_rows)} rows")
+        elog(f"✅ Export complete in {format_duration(time.time() - run_start)}! "
+             f"{len(products)} products, {len(all_rows)} rows")
+        export_status.success(f"Done — took {format_duration(time.time() - run_start)}")
 
     # Download button
     if st.session_state.export_df is not None:
@@ -1520,6 +1708,112 @@ with tab6:
 
             if not mismatched and not unlisted:
                 st.success("✅ The reference table above matches your store exactly.")
+
+    st.markdown("---")
+    st.markdown("**🔬 Inspect one product's raw metafields**")
+    st.caption(
+        "Bypasses the Export tab entirely — asks Shopify directly for every metafield "
+        "that actually has a value on one product, with no column picker, batching, or "
+        "`keys` filtering in the way. Use this to check whether a value is really missing "
+        "in Shopify, or whether the export is dropping something that IS there."
+    )
+
+    if not st.session_state.connected:
+        st.info("Connect to your store in the sidebar to use this.")
+    else:
+        inspect_query = st.text_input(
+            "Product SKU or handle", key="inspect_product_query",
+            placeholder="e.g. SPLDN19652-14KY-1.32CT or the-product-handle",
+        )
+        if st.button("🔬 Fetch raw metafields", key="inspect_fetch_btn") and inspect_query.strip():
+            needle = inspect_query.strip()
+            match = None
+            for p in products:
+                if p.get("handle", "") == needle:
+                    match = p
+                    break
+                if any(str(v.get("sku", "")).strip() == needle for v in p.get("variants", [])):
+                    match = p
+                    break
+
+            if not match:
+                st.error(
+                    f"No product found in the cached product list for '{needle}'. "
+                    "Try 🔄 Refresh products near the top of the page first."
+                )
+            else:
+                with st.spinner(f"Querying Shopify for {match.get('title', '')}..."):
+                    raw_by_id, raw_error = fetch_metafields_bulk(
+                        st.session_state.headers, st.session_state.store_url, [match["id"]]
+                    )
+                if raw_error:
+                    st.error(f"❌ {raw_error}")
+                else:
+                    raw = raw_by_id.get(match["id"], [])
+                    st.success(f"{match.get('title', '')} — Shopify returned {len(raw)} metafield(s) with a value")
+                    if raw:
+                        st.dataframe(pd.DataFrame(raw), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning(
+                            "Shopify returned zero metafields with a value for this product — "
+                            "so if a field looks empty in the export, it's genuinely empty on "
+                            "this product in Shopify too, not an export bug."
+                        )
+
+                # Make the exact same request by hand and show everything —
+                # the literal query text sent, the variables, and the raw
+                # response — so a live mismatch against Shopify's real API
+                # is visible instead of hidden behind fetch_metafields_bulk's
+                # processing.
+                gql_url = f"https://{st.session_state.store_url}/admin/api/2025-01/graphql.json"
+                dbg_query, dbg_variables = build_aliased_metafields_query([match["id"]], 50, None)
+                dbg_resp = requests.post(
+                    gql_url, headers=st.session_state.headers,
+                    json={"query": dbg_query, "variables": dbg_variables},
+                    timeout=60,
+                )
+                with st.expander("🔍 Exact request + raw response sent just now", expanded=True):
+                    st.caption("Query sent:")
+                    st.code(dbg_query, language="graphql")
+                    st.caption("Variables sent:")
+                    st.json(dbg_variables)
+                    st.caption(f"HTTP {dbg_resp.status_code} response:")
+                    try:
+                        st.json(dbg_resp.json())
+                    except ValueError:
+                        st.code(dbg_resp.text[:2000])
+
+                # The real Export tab never calls fetch_metafields_bulk
+                # unfiltered like above — it always passes a real, non-empty
+                # `keys` list, batched across many products at once. Test
+                # that exact shape too, using the keys just found as known-
+                # good input, so a bug specific to the filtered/batched path
+                # (untested until now) doesn't hide behind this single
+                # unfiltered product working.
+                if raw:
+                    test_keys = [f"{mf['namespace']}.{mf['key']}" for mf in raw]
+                    other = next((p for p in products if p["id"] != match["id"]), None)
+                    test_ids = [match["id"], other["id"]] if other else [match["id"]]
+
+                    with st.spinner("Testing the filtered, batched shape the real export uses..."):
+                        filtered_result, filtered_error = fetch_metafields_bulk(
+                            st.session_state.headers, st.session_state.store_url,
+                            test_ids, keys=test_keys,
+                        )
+                    st.markdown(f"**Same query shape the Export tab uses** (keys filter, {len(test_ids)} product(s) batched):")
+                    if filtered_error:
+                        st.error(f"❌ {filtered_error}")
+                    else:
+                        found = filtered_result.get(match["id"], [])
+                        if len(found) == len(raw):
+                            st.success(f"✅ Filtered/batched path returned all {len(found)} metafield(s) too — this path works.")
+                        else:
+                            st.error(
+                                f"⚠️ Filtered/batched path returned {len(found)} metafield(s) for this product, "
+                                f"but the unfiltered single-product call above returned {len(raw)}. "
+                                "This is the bug — something about the keys filter or batching drops data."
+                            )
+                        st.json(filtered_result)
 
     st.markdown("---")
     st.markdown("""
