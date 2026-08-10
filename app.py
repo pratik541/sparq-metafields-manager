@@ -476,11 +476,30 @@ def metafield_map_from_definitions(defs_rows):
     return metafield_map
 
 
+def _variant_fields(variant):
+    """Per-variant columns, shared by the main row and every extra variant row."""
+    return {
+        "Option1 Value": variant.get("option1","Default Title"),
+        "Option2 Value": variant.get("option2",""),
+        "Option3 Value": variant.get("option3",""),
+        "Variant SKU": variant.get("sku",""), "Variant Grams": variant.get("grams",0),
+        "Variant Inventory Tracker": variant.get("inventory_management",""),
+        "Variant Inventory Qty": variant.get("inventory_quantity",0),
+        "Variant Inventory Policy": variant.get("inventory_policy","deny"),
+        "Variant Fulfillment Service": variant.get("fulfillment_service","manual"),
+        "Variant Price": variant.get("price",""), "Variant Compare At Price": variant.get("compare_at_price",""),
+        "Variant Requires Shipping": str(variant.get("requires_shipping", True)).upper(),
+        "Variant Taxable": str(variant.get("taxable", True)).upper(),
+        "Variant Barcode": variant.get("barcode",""),
+        "Variant Image": variant.get("image_id",""), "Variant Weight Unit": variant.get("weight_unit","kg"),
+    }
+
+
 def build_export_rows(product, metafields, metafield_map=None):
     if metafield_map is None:
         metafield_map = METAFIELD_MAP
     mf_lookup = {(mf["namespace"], mf["key"]): mf["value"] for mf in metafields}
-    variant   = product["variants"][0] if product.get("variants") else {}
+    variants  = product.get("variants") or [{}]
     images    = sorted(product.get("images", []), key=lambda x: x.get("position", 99))
     rows      = []
 
@@ -492,23 +511,12 @@ def build_export_rows(product, metafields, metafield_map=None):
         "Product Category": product.get("product_type",""), "Type": product.get("product_type",""),
         "Tags": product.get("tags",""),
         "Published": str(product.get("published_at") is not None).upper(),
-        "Option1 Name": options[0]["name"] if options else "Title",
-        "Option1 Value": variant.get("option1","Default Title"), "Option1 Linked To": "",
-        "Option2 Name": options[1]["name"] if len(options) > 1 else "",
-        "Option2 Value": variant.get("option2",""), "Option2 Linked To": "",
-        "Option3 Name": options[2]["name"] if len(options) > 2 else "",
-        "Option3 Value": variant.get("option3",""), "Option3 Linked To": "",
-        "Variant SKU": variant.get("sku",""), "Variant Grams": variant.get("grams",0),
-        "Variant Inventory Tracker": variant.get("inventory_management",""),
-        "Variant Inventory Qty": variant.get("inventory_quantity",0),
-        "Variant Inventory Policy": variant.get("inventory_policy","deny"),
-        "Variant Fulfillment Service": variant.get("fulfillment_service","manual"),
-        "Variant Price": variant.get("price",""), "Variant Compare At Price": variant.get("compare_at_price",""),
-        "Variant Requires Shipping": str(variant.get("requires_shipping", True)).upper(),
-        "Variant Taxable": str(variant.get("taxable", True)).upper(),
+        "Option1 Name": options[0]["name"] if options else "Title", "Option1 Linked To": "",
+        "Option2 Name": options[1]["name"] if len(options) > 1 else "", "Option2 Linked To": "",
+        "Option3 Name": options[2]["name"] if len(options) > 2 else "", "Option3 Linked To": "",
+        **_variant_fields(variants[0]),
         "Unit Price Total Measure": "", "Unit Price Total Measure Unit": "",
         "Unit Price Base Measure": "", "Unit Price Base Measure Unit": "",
-        "Variant Barcode": variant.get("barcode",""),
         "Image Src": images[0]["src"] if images else "",
         "Image Position": images[0]["position"] if images else "",
         "Image Alt Text": images[0].get("alt","") if images else "",
@@ -522,7 +530,6 @@ def build_export_rows(product, metafields, metafield_map=None):
         # old admin UI; harmless "" fallback for stores that never did.
         "SEO Title": product.get("metafields_global_title_tag") or "",
         "SEO Description": product.get("metafields_global_description_tag") or "",
-        "Variant Image": variant.get("image_id",""), "Variant Weight Unit": variant.get("weight_unit","kg"),
         "Variant Tax Code": "", "Cost per item": "",
         "Status": product.get("status","active"),
     }
@@ -532,6 +539,15 @@ def build_export_rows(product, metafields, metafield_map=None):
         main[col_name] = mf_lookup.get((ns, key), "")
 
     rows.append(main)
+
+    # Every variant beyond the first (different metal/size/etc.) gets its own
+    # row — product-level fields and metafields blank, same convention Shopify's
+    # own export uses, since those only apply to the product as a whole.
+    for variant in variants[1:]:
+        row = {col: "" for col in main.keys()}
+        row["Handle"] = product.get("handle","")
+        row.update(_variant_fields(variant))
+        rows.append(row)
 
     for img in images[1:]:
         row = {col: "" for col in main.keys()}
