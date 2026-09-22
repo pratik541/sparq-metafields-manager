@@ -1455,6 +1455,8 @@ with tab4:
                 failed_rows  = []
                 run_start    = time.time()
 
+                interrupted_at = None
+
                 for batch_i in range(real_batches):
                     s = batch_i * BATCH_SIZE
                     e = s + BATCH_SIZE
@@ -1469,68 +1471,106 @@ with tab4:
                         f"{progress_line(time.time() - run_start, batch_i, real_batches)}"
                     )
 
-                    for attempt in range(3):
-                        resp = requests.post(
-                            gql_url,
-                            headers=st.session_state.headers,
-                            json={"query": METAFIELDS_SET_MUTATION,
-                                  "variables": {"metafields": batch}},
-                            timeout=60
-                        )
+                    try:
+                        for attempt in range(3):
+                            try:
+                                resp = requests.post(
+                                    gql_url,
+                                    headers=st.session_state.headers,
+                                    json={"query": METAFIELDS_SET_MUTATION,
+                                          "variables": {"metafields": batch}},
+                                    timeout=60
+                                )
+                            except requests.exceptions.RequestException as exc:
+                                if attempt == 2:
+                                    blog(f"  ❌ Network error, giving up on batch {batch_i+1}: {exc}")
+                                    for m in batch_meta:
+                                        failed_rows.append({**m, "Error": f"Network error: {exc}"})
+                                    error_cnt += len(batch)
+                                    break
+                                blog(f"  ⏳ Network error — retrying (batch {batch_i+1}): {exc}")
+                                time.sleep(3)
+                                continue
 
-                        if resp.status_code == 429:
-                            blog(f"  ⏳ HTTP 429 — waiting 3s (batch {batch_i+1})")
-                            time.sleep(3)
-                            continue
+                            if resp.status_code == 429:
+                                if attempt == 2:
+                                    blog(f"  ❌ HTTP 429 persisted, giving up on batch {batch_i+1}")
+                                    for m in batch_meta:
+                                        failed_rows.append({**m, "Error": "HTTP 429 (rate limited, retries exhausted)"})
+                                    error_cnt += len(batch)
+                                    break
+                                blog(f"  ⏳ HTTP 429 — waiting 3s (batch {batch_i+1})")
+                                time.sleep(3)
+                                continue
 
-                        if resp.status_code != 200:
-                            blog(f"  ❌ HTTP {resp.status_code}: {resp.text[:80]}")
-                            for m in batch_meta:
-                                failed_rows.append({**m, "Error": f"HTTP {resp.status_code}"})
-                            error_cnt += len(batch)
-                            break
+                            if resp.status_code != 200:
+                                blog(f"  ❌ HTTP {resp.status_code}: {resp.text[:80]}")
+                                for m in batch_meta:
+                                    failed_rows.append({**m, "Error": f"HTTP {resp.status_code}"})
+                                error_cnt += len(batch)
+                                break
 
-                        data   = resp.json()
-                        errors = data.get("errors", [])
+                            data   = resp.json()
+                            errors = data.get("errors", [])
 
-                        if errors and any(
-                            err.get("extensions", {}).get("code") == "THROTTLED"
-                            for err in errors
-                        ):
-                            retry_after = errors[0].get("extensions", {}).get("retryAfter", 2)
-                            blog(f"  ⏳ Throttled — waiting {retry_after}s (batch {batch_i+1})")
-                            time.sleep(float(retry_after) + 0.5)
-                            continue
+                            if errors and any(
+                                err.get("extensions", {}).get("code") == "THROTTLED"
+                                for err in errors
+                            ):
+                                retry_after = errors[0].get("extensions", {}).get("retryAfter", 2)
+                                if attempt == 2:
+                                    blog(f"  ❌ Throttled repeatedly, giving up on batch {batch_i+1}")
+                                    for m in batch_meta:
+                                        failed_rows.append({**m, "Error": "GraphQL throttled, retries exhausted"})
+                                    error_cnt += len(batch)
+                                    break
+                                blog(f"  ⏳ Throttled — waiting {retry_after}s (batch {batch_i+1})")
+                                time.sleep(float(retry_after) + 0.5)
+                                continue
 
-                        result      = (data.get("data") or {}).get("metafieldsSet") or {}
-                        set_ok      = result.get("metafields", [])
-                        user_errors = result.get("userErrors", [])
+                            result      = (data.get("data") or {}).get("metafieldsSet") or {}
+                            set_ok      = result.get("metafields", [])
+                            user_errors = result.get("userErrors", [])
 
-                        failed_idx = {
-                            ue.get("elementIndex", -1):
-                                f"{ue.get('field','')}: {ue['message']}"
-                            for ue in user_errors
-                        }
-                        for idx, meta in enumerate(batch_meta):
-                            if idx in failed_idx:
-                                failed_rows.append({**meta, "Error": failed_idx[idx]})
-                                error_cnt += 1
+                            failed_idx = {
+                                ue.get("elementIndex", -1):
+                                    f"{ue.get('field','')}: {ue['message']}"
+                                for ue in user_errors
+                            }
+                            for idx, meta in enumerate(batch_meta):
+                                if idx in failed_idx:
+                                    failed_rows.append({**meta, "Error": failed_idx[idx]})
+                                    error_cnt += 1
+                                else:
+                                    success_rows.append(meta)
+                                    success_cnt += 1
+
+                            if user_errors:
+                                blog(f"  ⚠️ Batch {batch_i+1} — {len(set_ok)} set, "
+                                     f"{len(user_errors)} errors")
+                                for ue in user_errors[:5]:  # cap log lines
+                                    blog(f"    ❌ [{ue.get('elementIndex','')}] "
+                                         f"{ue.get('field','')}: {ue['message']}")
                             else:
-                                success_rows.append(meta)
-                                success_cnt += 1
-
-                        if user_errors:
-                            blog(f"  ⚠️ Batch {batch_i+1} — {len(set_ok)} set, "
-                                 f"{len(user_errors)} errors")
-                            for ue in user_errors[:5]:  # cap log lines
-                                blog(f"    ❌ [{ue.get('elementIndex','')}] "
-                                     f"{ue.get('field','')}: {ue['message']}")
-                        else:
-                            blog(f"  ✅ Batch {batch_i+1}/{real_batches} — "
-                                 f"{len(set_ok)} metafields set")
+                                blog(f"  ✅ Batch {batch_i+1}/{real_batches} — "
+                                     f"{len(set_ok)} metafields set")
+                            break
+                    except Exception as exc:
+                        blog(f"  ❌ Unexpected error on batch {batch_i+1}, stopping run: {exc}")
+                        for m in batch_meta:
+                            failed_rows.append({**m, "Error": f"Unexpected error: {exc}"})
+                        error_cnt += len(batch)
+                        interrupted_at = e
                         break
 
                     time.sleep(0.5)
+
+                if interrupted_at is not None:
+                    remaining = metafield_metas[interrupted_at:]
+                    for m in remaining:
+                        failed_rows.append({**m, "Error": "Not attempted — run stopped early"})
+                    error_cnt += len(remaining)
+                    blog(f"⚠️ Run stopped early — {len(remaining)} remaining rows not attempted")
 
                 # ── Save results to session state ─────────────────
                 st.session_state.bulk_results = {
@@ -1544,9 +1584,10 @@ with tab4:
 
                 bulk_prog.progress(1.0)
                 bulk_status.markdown(
-                    f"**✅ Metafield update complete** — took "
-                    f"{format_duration(time.time() - run_start)} "
-                    f"for {real_batches} batches"
+                    (f"**⚠️ Metafield update stopped early**" if interrupted_at is not None
+                     else f"**✅ Metafield update complete**")
+                    + f" — took {format_duration(time.time() - run_start)} "
+                    + f"for {real_batches} batches"
                 )
                 blog("")
                 blog("─────────────────────────────────────")
