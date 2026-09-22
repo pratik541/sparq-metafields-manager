@@ -39,6 +39,7 @@ NATIVE_PRODUCT_FIELDS = {
     "Status":          "status",
     "SEO Title":       "seo.title",
     "SEO Description": "seo.description",
+    "URL Handle":      "handle",
 }
 
 # Blank means "skip", so clearing a field needs an explicit sentinel.
@@ -335,6 +336,7 @@ VARIANT_CACHE_KEYS = {
 PRODUCT_CACHE_KEYS = {
     "Title": "title", "Body (HTML)": "body_html", "Vendor": "vendor",
     "Type": "product_type", "Tags": "tags", "Status": "status",
+    "URL Handle": "handle",
 }
 UNKNOWN_CURRENT = {"Cost per item", "Variant Tax Code", "SEO Title", "SEO Description"}
 UNKNOWN, CLEARED = "unknown", "(cleared)"

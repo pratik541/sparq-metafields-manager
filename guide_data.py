@@ -215,6 +215,14 @@ GUIDE_ROWS = [
         "Type / allowed values": "Text",
         "Example": "Certified lab grown diamond earrings in 14K gold",
     },
+    {
+        "I want to change": "URL slug / handle",
+        "Use this tab": "Update Native Fields",
+        "Put this in your CSV": "URL Handle",
+        "Kind": "Native column",
+        "Type / allowed values": "Text — lowercase, hyphenated, must be unique. Use Variant SKU (not Handle) to identify the row, since Handle is already the lookup key",
+        "Example": "morena-delicate-cluster-lab-grown-diamond-mangalsutra",
+    },
     # ── Shopify standard taxonomy metafields ──────────────────────────
     {
         "I want to change": "Jewellery type (Shopify category field)",

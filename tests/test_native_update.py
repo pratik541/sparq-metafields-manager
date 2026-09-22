@@ -243,6 +243,11 @@ class TestBuildProductInput:
         result, _ = build_product_input({"Body (HTML)": "<p>hi</p>"}, PRODUCT_GID)
         assert result["descriptionHtml"] == "<p>hi</p>"
 
+    def test_url_handle_mapped_to_handle(self):
+        result, errors = build_product_input({"URL Handle": "gold-earrings"}, PRODUCT_GID)
+        assert errors == []
+        assert result["handle"] == "gold-earrings"
+
     def test_variant_columns_ignored_at_product_level(self):
         result, errors = build_product_input({"Variant Price": "1999"}, PRODUCT_GID)
         assert result is None
@@ -271,6 +276,13 @@ class TestBatchingAndResolution:
         assert diff_row({"Variant Price": "287,093.00"}, variant, [])[0]["Changed"] is False
         assert diff_row({"Cost per item": "10"}, variant, [])[0]["Changed"] is True
         assert current_value("Cost per item", variant, {}) == "unknown"
+
+    def test_diff_reads_current_url_handle_from_product_cache(self):
+        product = {"handle": "old-slug"}
+        [record] = diff_row({"URL Handle": "new-slug"}, None, product)
+        assert record["Current"] == "old-slug"
+        assert record["New"] == "new-slug"
+        assert record["Changed"] is True
 
     def test_resolve_rows_buckets_native_updates(self):
         products = [{"id": 2, "handle": "ring", "title": "Ring", "variants": [{"id": 1, "sku": "SKU-1", "price": "10"}]}]
