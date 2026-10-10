@@ -20,6 +20,7 @@ from guide_data import (
     GUIDE_COLUMNS, GUIDE_ROWS, compare_with_guide, native_sample_rows,
 )
 from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definitions
+from native_field_schema import SCHEMA_COLUMNS, fetch_native_field_schema
 from metafield_export import batch_size_for, build_aliased_metafields_query, fetch_metafields_bulk
 from eta import format_duration, progress_line, upfront_estimate_seconds
 
@@ -574,6 +575,8 @@ if "native_preview" not in st.session_state: st.session_state.native_preview = N
 if "native_results" not in st.session_state: st.session_state.native_results = None
 if "guide_definitions" not in st.session_state: st.session_state.guide_definitions = None
 if "guide_definitions_error" not in st.session_state: st.session_state.guide_definitions_error = None
+if "guide_native_schema" not in st.session_state: st.session_state.guide_native_schema = None
+if "guide_native_schema_error" not in st.session_state: st.session_state.guide_native_schema_error = None
 if "export_metafield_defs" not in st.session_state: st.session_state.export_metafield_defs = None
 if "export_metafield_defs_error" not in st.session_state: st.session_state.export_metafield_defs_error = None
 if "products" not in st.session_state: st.session_state.products = None
@@ -1765,6 +1768,49 @@ with tab6:
 
             if not mismatched and not unlisted:
                 st.success("✅ The reference table above matches your store exactly.")
+
+    st.markdown("---")
+    st.markdown("**🔎 Every native field Shopify's API actually accepts**")
+    st.caption(
+        "Update Native Fields only maps a tested subset of Shopify's product/variant "
+        "fields (Title, Body (HTML), SEO fields, Variant Price, etc.). This reads the "
+        "live schema to show every field Shopify's API accepts, including ones this "
+        "app doesn't support yet — so you know what's genuinely possible vs. what's "
+        "wired up today."
+    )
+
+    if not st.session_state.connected:
+        st.info("Connect to your store in the sidebar to use this.")
+    else:
+        if st.button("🔎 Load native field schema", key="guide_load_native_schema"):
+            with st.spinner("Reading the native field schema from Shopify..."):
+                schema_rows, schema_error = fetch_native_field_schema(
+                    st.session_state.headers, st.session_state.store_url
+                )
+            st.session_state.guide_native_schema = schema_rows
+            st.session_state.guide_native_schema_error = schema_error
+
+        if st.session_state.guide_native_schema_error:
+            st.error(f"❌ {st.session_state.guide_native_schema_error}")
+
+        if st.session_state.guide_native_schema:
+            schema_df = pd.DataFrame(
+                st.session_state.guide_native_schema, columns=SCHEMA_COLUMNS
+            )
+            supported = (schema_df["Supported in this app"] == "Yes").sum()
+            st.success(
+                f"✅ {len(schema_df)} fields found on Product/Variant "
+                f"({supported} supported in this app today, {len(schema_df) - supported} not yet). "
+                "The GraphQL Path column is what a future CSV column would map to."
+            )
+            st.dataframe(schema_df, use_container_width=True, hide_index=True, height=420)
+            st.download_button(
+                "⬇️ Download native field schema as CSV",
+                data=schema_df.to_csv(index=False).encode("utf-8"),
+                file_name="my_native_field_schema.csv",
+                mime="text/csv",
+                key="guide_dl_native_schema"
+            )
 
     st.markdown("---")
     st.markdown("**🔬 Inspect one product's raw metafields**")
