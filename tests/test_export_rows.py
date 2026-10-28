@@ -90,3 +90,81 @@ class TestVariantRows:
         assert rows[1]["Variant SKU"] == "SKU-WG-5"
         assert rows[2]["Variant SKU"] == ""
         assert rows[2]["Image Src"] == "img2.jpg"
+
+
+class TestNoExtras:
+    """Without a fetch_native_extras_bulk result, every extra-native column
+    falls back exactly the way it always did before that pass existed.
+    """
+
+    def test_product_category_falls_back_to_product_type(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={})
+        assert rows[0]["Product Category"] == "Ring"
+
+    def test_gift_card_defaults_to_false(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={})
+        assert rows[0]["Gift Card"] == "FALSE"
+
+    def test_cost_and_customs_columns_blank(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={})
+        assert rows[0]["Cost per item"] == ""
+        assert rows[0]["Variant Country Of Origin"] == ""
+        assert rows[0]["Variant Requires Components"] == ""
+
+
+class TestWithExtras:
+    """fetch_native_extras_bulk's per-product dict, as build_export_rows expects it."""
+
+    def extras(self, **overrides):
+        base = {
+            "category_full_name": "Apparel & Accessories > Jewelry > Rings",
+            "is_gift_card": True,
+            "template_suffix": "custom",
+            "gift_card_template_suffix": "",
+            "requires_selling_plan": False,
+            "combined_listing_role": None,
+            "variants": {},
+        }
+        base.update(overrides)
+        return base
+
+    def test_product_category_uses_real_taxonomy_name(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={}, extras=self.extras())
+        assert rows[0]["Product Category"] == "Apparel & Accessories > Jewelry > Rings"
+
+    def test_gift_card_reflects_real_value(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={}, extras=self.extras(is_gift_card=True))
+        assert rows[0]["Gift Card"] == "TRUE"
+
+    def test_product_level_extras_only_populate_first_row(self):
+        p = product([variant("SKU-G-5", "Gold"), variant("SKU-WG-5", "White Gold")])
+        rows = build_export_rows(p, [], metafield_map={}, extras=self.extras())
+        assert rows[0]["Template Suffix"] == "custom"
+        assert rows[1]["Template Suffix"] == ""
+
+    def test_variant_level_extras_matched_by_variant_id(self):
+        p = product([
+            variant("SKU-G-5", "Gold"),
+            variant("SKU-WG-5", "White Gold"),
+        ])
+        extras = self.extras(variants={
+            "SKU-G-5": {
+                "unit_cost": "150.00", "country_code_of_origin": "IN",
+                "harmonized_system_code": "7113", "province_code_of_origin": "MH",
+                "requires_components": False, "show_unit_price": True,
+            },
+        })
+        rows = build_export_rows(p, [], metafield_map={}, extras=extras)
+        # Matched variant gets its own extras...
+        assert rows[0]["Cost per item"] == "150.00"
+        assert rows[0]["Variant Country Of Origin"] == "IN"
+        assert rows[0]["Variant Requires Components"] == "FALSE"
+        assert rows[0]["Variant Show Unit Price"] == "TRUE"
+        # ...the unmatched one falls back to blank, not the matched variant's values.
+        assert rows[1]["Cost per item"] == ""
+        assert rows[1]["Variant Country Of Origin"] == ""

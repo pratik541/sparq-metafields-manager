@@ -39,9 +39,20 @@ GRAPHQL_COST_BUDGET = 900
 
 MAX_ATTEMPTS = 3
 
+# How many variants to ask for per product when fetching the native-field
+# extras below. Generous for any realistic catalog; a product with more
+# variants than this just gets extras for its first VARIANTS_FIRST, the same
+# "best effort, don't fail the batch" tradeoff PRODUCT_METAFIELDS_FIRST makes.
+VARIANTS_FIRST = 100
+EXTRAS_FETCH_BATCH_SIZE = max(1, min(50, GRAPHQL_COST_BUDGET // (VARIANTS_FIRST + 10)))
+
 
 def product_gid(product_id):
     return f"gid://shopify/Product/{product_id}"
+
+
+def _variant_id_from_gid(gid):
+    return int(gid.rsplit("/", 1)[-1])
 
 
 def _normalize_key(node):
@@ -184,6 +195,125 @@ def fetch_metafields_bulk(headers, store_url, product_ids, keys=None,
             metafields = [_normalize_key(edge["node"]) for edge in edges]
             if metafields:
                 result[pid] = metafields
+        return result, None
+
+    return {}, f"Rate limited — gave up after {MAX_ATTEMPTS} attempts"
+
+
+def build_aliased_extras_query(product_ids):
+    """One aliased product(id:) field per product, asking for the native
+    fields the REST products.json payload never carries at all: the real
+    Standard Product Taxonomy category (REST only has the free-text product
+    type), gift card status, template suffixes, and per-variant customs/cost
+    data that otherwise requires a separate InventoryItem lookup.
+    """
+    definitions, selections = [], []
+    variables = {}
+    for index, pid in enumerate(product_ids):
+        definitions.append(f"$id{index}: ID!")
+        variables[f"id{index}"] = product_gid(pid)
+        selections.append(
+            f"  p{index}: product(id: $id{index}) {{\n"
+            "    category { fullName }\n"
+            "    isGiftCard\n"
+            "    templateSuffix\n"
+            "    giftCardTemplateSuffix\n"
+            "    requiresSellingPlan\n"
+            "    combinedListingRole\n"
+            f"    variants(first: {VARIANTS_FIRST}) {{\n"
+            "      edges { node {\n"
+            "        id\n"
+            "        requiresComponents\n"
+            "        showUnitPrice\n"
+            "        inventoryItem {\n"
+            "          unitCost { amount }\n"
+            "          countryCodeOfOrigin\n"
+            "          harmonizedSystemCode\n"
+            "          provinceCodeOfOrigin\n"
+            "        }\n"
+            "      } }\n"
+            "    }\n"
+            "  }"
+        )
+    query = ("query ProductNativeExtrasBulk(" + ", ".join(definitions) + ") {\n"
+             + "\n".join(selections) + "\n}")
+    return query, variables
+
+
+def fetch_native_extras_bulk(headers, store_url, product_ids,
+                             http_post=None, sleep=None, on_cost=None):
+    """Fetch per-product/variant native fields not present in the REST export.
+
+    Returns (extras_by_id, error). extras_by_id maps REST product id to a
+    dict of product-level extras plus a "variants" dict keyed by REST variant
+    id — see build_export_rows for exactly how each key is consumed. Products
+    absent from the response are simply absent from the result. error is None
+    on success, else a message describing what went wrong — callers can skip
+    these extra columns for this batch and keep going, same fallback shape as
+    fetch_metafields_bulk.
+    """
+    if not product_ids:
+        return {}, None
+
+    post, pause = http_post or requests.post, sleep or time.sleep
+    url = f"https://{store_url}/admin/api/{API_VER}/graphql.json"
+    query, variables = build_aliased_extras_query(product_ids)
+
+    for _attempt in range(MAX_ATTEMPTS):
+        response = post(url, headers=headers,
+                        json={"query": query, "variables": variables},
+                        timeout=60)
+        if response.status_code == 429:
+            pause(3)
+            continue
+        if response.status_code != 200:
+            return {}, f"HTTP {response.status_code}: {response.text[:160]}"
+
+        data = response.json()
+        if on_cost is not None:
+            cost = extract_cost(data)
+            if cost is not None:
+                on_cost(cost)
+
+        errors = data.get("errors") or []
+        throttled = [e for e in errors if e.get("extensions", {}).get("code") == "THROTTLED"]
+        if throttled:
+            pause(float(throttled[0].get("extensions", {}).get("retryAfter", 2)) + 0.5)
+            continue
+        if errors:
+            return {}, str(errors[0].get("message", "GraphQL error"))[:200]
+
+        result = {}
+        response_data = data.get("data") or {}
+        for index, pid in enumerate(product_ids):
+            node = response_data.get(f"p{index}")
+            if not node:
+                continue
+
+            variants_by_id = {}
+            for edge in ((node.get("variants") or {}).get("edges")) or []:
+                vnode = edge["node"]
+                item = vnode.get("inventoryItem") or {}
+                unit_cost = item.get("unitCost") or {}
+                variants_by_id[_variant_id_from_gid(vnode["id"])] = {
+                    "unit_cost": unit_cost.get("amount"),
+                    "country_code_of_origin": item.get("countryCodeOfOrigin"),
+                    "harmonized_system_code": item.get("harmonizedSystemCode"),
+                    "province_code_of_origin": item.get("provinceCodeOfOrigin"),
+                    "requires_components": vnode.get("requiresComponents"),
+                    "show_unit_price": vnode.get("showUnitPrice"),
+                }
+
+            category = node.get("category") or {}
+            result[pid] = {
+                "category_full_name": category.get("fullName"),
+                "is_gift_card": node.get("isGiftCard"),
+                "template_suffix": node.get("templateSuffix"),
+                "gift_card_template_suffix": node.get("giftCardTemplateSuffix"),
+                "requires_selling_plan": node.get("requiresSellingPlan"),
+                "combined_listing_role": node.get("combinedListingRole"),
+                "variants": variants_by_id,
+            }
         return result, None
 
     return {}, f"Rate limited — gave up after {MAX_ATTEMPTS} attempts"

@@ -21,7 +21,10 @@ from guide_data import (
 )
 from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definitions
 from native_field_schema import SCHEMA_COLUMNS, fetch_native_field_schema
-from metafield_export import batch_size_for, build_aliased_metafields_query, fetch_metafields_bulk
+from metafield_export import (
+    EXTRAS_FETCH_BATCH_SIZE, batch_size_for, build_aliased_metafields_query,
+    fetch_metafields_bulk, fetch_native_extras_bulk,
+)
 from eta import format_duration, progress_line, upfront_estimate_seconds
 
 _env_file = Path(__file__).parent / "config" / ".env"
@@ -275,6 +278,14 @@ TEMPLATE_COLS_PRE_METAFIELDS = [
 
 TEMPLATE_COLS_POST_METAFIELDS = [
     "Variant Image","Variant Weight Unit","Variant Tax Code","Cost per item","Status",
+    # Native fields the REST products.json payload never carries at all —
+    # populated only when the "extra native fields" GraphQL pass runs (see
+    # fetch_native_extras_bulk); blank otherwise, same as Cost per item was
+    # before it moved into that pass.
+    "Template Suffix","Gift Card Template Suffix","Requires Selling Plan",
+    "Combined Listing Role","Variant Country Of Origin",
+    "Variant Harmonized System Code","Variant Province Of Origin",
+    "Variant Requires Components","Variant Show Unit Price",
 ]
 
 BATCH_SIZE = 25  # metafieldsSet accepts max 25 per call
@@ -446,6 +457,34 @@ def format_value_bulk(value, mf_type):
     return raw
 
 
+def read_uploaded_csv(file):
+    """Read a user-uploaded CSV, tolerating the encodings Excel actually saves.
+
+    pandas defaults (and this app's own utf-8-sig calls) raise an unhandled
+    UnicodeDecodeError on anything else, which crashes the whole Streamlit
+    run with a red traceback box instead of the CSV preview — confirmed live
+    on the hosted app from a plain "CSV" export out of Excel, whose default
+    save format is Windows-1252/ANSI, not UTF-8. So this is the common case
+    here, not an edge case. Tries encodings in order of how likely each is to
+    be the *correct* interpretation: cp1252 only accepts the specific byte
+    patterns Windows actually produces for it, so it's tried before the
+    fully-permissive latin-1, which maps every byte 0-255 and therefore never
+    raises — but can silently turn the wrong bytes into the wrong characters
+    if tried first.
+    """
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        file.seek(0)
+        try:
+            return pd.read_csv(file, encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    st.error(
+        "❌ Could not read this CSV — its text encoding isn't one this app "
+        "recognizes. Try re-saving it from Excel as 'CSV UTF-8 (Comma delimited)'."
+    )
+    st.stop()
+
+
 def parse_metafield_columns(df_columns):
     meta_cols = {}
     for col in df_columns:
@@ -477,8 +516,22 @@ def metafield_map_from_definitions(defs_rows):
     return metafield_map
 
 
-def _variant_fields(variant):
-    """Per-variant columns, shared by the main row and every extra variant row."""
+def _bool_or_blank(value):
+    """TRUE/FALSE for a known boolean, "" when the value was never fetched."""
+    if value is None:
+        return ""
+    return "TRUE" if value else "FALSE"
+
+
+def _variant_fields(variant, extras=None):
+    """Per-variant columns, shared by the main row and every extra variant row.
+
+    extras, if given, is one entry of fetch_native_extras_bulk's per-product
+    "variants" dict — fields it doesn't carry (because the extras pass wasn't
+    run, or this variant was past VARIANTS_FIRST) fall back to blank.
+    """
+    extras = extras or {}
+    unit_cost = extras.get("unit_cost")
     return {
         "Option1 Value": variant.get("option1","Default Title"),
         "Option2 Value": variant.get("option2",""),
@@ -493,12 +546,26 @@ def _variant_fields(variant):
         "Variant Taxable": str(variant.get("taxable", True)).upper(),
         "Variant Barcode": variant.get("barcode",""),
         "Variant Image": variant.get("image_id",""), "Variant Weight Unit": variant.get("weight_unit","kg"),
+        "Cost per item": unit_cost if unit_cost is not None else "",
+        "Variant Country Of Origin": extras.get("country_code_of_origin") or "",
+        "Variant Harmonized System Code": extras.get("harmonized_system_code") or "",
+        "Variant Province Of Origin": extras.get("province_code_of_origin") or "",
+        "Variant Requires Components": _bool_or_blank(extras.get("requires_components")),
+        "Variant Show Unit Price": _bool_or_blank(extras.get("show_unit_price")),
     }
 
 
-def build_export_rows(product, metafields, metafield_map=None):
+def build_export_rows(product, metafields, metafield_map=None, extras=None):
+    """extras, if given, is fetch_native_extras_bulk's entry for this product —
+    native fields the REST products.json payload never carries at all (real
+    taxonomy category, gift card status, template suffixes, per-variant
+    customs/cost data). Omitted, every one of those columns comes back blank,
+    same as before this pass existed.
+    """
     if metafield_map is None:
         metafield_map = METAFIELD_MAP
+    extras = extras or {}
+    extras_by_variant_id = extras.get("variants") or {}
     mf_lookup = {(mf["namespace"], mf["key"]): mf["value"] for mf in metafields}
     variants  = product.get("variants") or [{}]
     images    = sorted(product.get("images", []), key=lambda x: x.get("position", 99))
@@ -509,30 +576,42 @@ def build_export_rows(product, metafields, metafield_map=None):
     main = {
         "Handle": product.get("handle",""), "Title": product.get("title",""),
         "Body (HTML)": product.get("body_html",""), "Vendor": product.get("vendor",""),
-        "Product Category": product.get("product_type",""), "Type": product.get("product_type",""),
+        # REST's product_type is a free-text field; the real Standard Product
+        # Taxonomy category (e.g. "Apparel & Accessories > Jewelry > Rings")
+        # only comes from the GraphQL extras pass. Falls back to product_type
+        # so this column isn't just blank when that pass is skipped.
+        "Product Category": extras.get("category_full_name") or product.get("product_type",""),
+        "Type": product.get("product_type",""),
         "Tags": product.get("tags",""),
         "Published": str(product.get("published_at") is not None).upper(),
         "Option1 Name": options[0]["name"] if options else "Title", "Option1 Linked To": "",
         "Option2 Name": options[1]["name"] if len(options) > 1 else "", "Option2 Linked To": "",
         "Option3 Name": options[2]["name"] if len(options) > 2 else "", "Option3 Linked To": "",
-        **_variant_fields(variants[0]),
+        **_variant_fields(variants[0], extras_by_variant_id.get(variants[0].get("id"))),
         "Unit Price Total Measure": "", "Unit Price Total Measure Unit": "",
         "Unit Price Base Measure": "", "Unit Price Base Measure Unit": "",
         "Image Src": images[0]["src"] if images else "",
         "Image Position": images[0]["position"] if images else "",
         "Image Alt Text": images[0].get("alt","") if images else "",
-        # Gift Card, Variant Tax Code and Cost per item aren't in the REST
-        # products.json payload at all (gift-card status is GraphQL-only;
-        # tax code and cost live on a separate InventoryItem lookup) — always
-        # blank until this export makes those extra calls.
-        "Gift Card": "FALSE",
+        # Gift Card status is GraphQL-only; "FALSE" is the same fallback
+        # default this column always had before the extras pass existed.
+        "Gift Card": _bool_or_blank(extras.get("is_gift_card")) or "FALSE",
         # metafields_global_*_tag are the legacy SEO fields Shopify still
         # returns on the product object for stores that set them via the
         # old admin UI; harmless "" fallback for stores that never did.
         "SEO Title": product.get("metafields_global_title_tag") or "",
         "SEO Description": product.get("metafields_global_description_tag") or "",
-        "Variant Tax Code": "", "Cost per item": "",
+        # Confirmed against Shopify's schema: unlike Cost per item (readable
+        # via InventoryItem.unitCost), there is no API field that returns a
+        # variant's tax code back out — ProductVariantsBulkInput.taxCode is
+        # write-only. Stays blank; this isn't a missing-call gap like the
+        # others, it's a real platform limitation.
+        "Variant Tax Code": "",
         "Status": product.get("status","active"),
+        "Template Suffix": extras.get("template_suffix") or "",
+        "Gift Card Template Suffix": extras.get("gift_card_template_suffix") or "",
+        "Requires Selling Plan": _bool_or_blank(extras.get("requires_selling_plan")),
+        "Combined Listing Role": extras.get("combined_listing_role") or "",
     }
     for col_name, (ns, key) in GOOGLE_SHOPPING_KEYS.items():
         main[col_name] = mf_lookup.get((ns, key), "")
@@ -547,7 +626,7 @@ def build_export_rows(product, metafields, metafield_map=None):
     for variant in variants[1:]:
         row = {col: "" for col in main.keys()}
         row["Handle"] = product.get("handle","")
-        row.update(_variant_fields(variant))
+        row.update(_variant_fields(variant, extras_by_variant_id.get(variant.get("id"))))
         rows.append(row)
 
     for img in images[1:]:
@@ -765,7 +844,7 @@ with tab1:
                                 help="Upload a Shopify-format CSV with metafield columns")
 
     if uploaded:
-        df_import = pd.read_csv(uploaded)
+        df_import = read_uploaded_csv(uploaded)
         meta_cols = parse_metafield_columns(df_import.columns)
 
         # Preview
@@ -903,7 +982,7 @@ with tab5:
 
     native_file = st.file_uploader("Upload native-fields CSV", type=["csv"], key="native_file")
     if native_file:
-        native_df = pd.read_csv(native_file, encoding="utf-8-sig")
+        native_df = read_uploaded_csv(native_file)
         native_df = native_df.loc[:, ~native_df.columns.astype(str).str.startswith("Unnamed")]
         native_columns = recognised_native_columns(native_df.columns)
         if not native_columns:
@@ -1048,6 +1127,14 @@ with tab2:
     with col_e1:
         st.metric("Products in Store", len(products))
         include_empty = st.checkbox("Include empty metafields", value=True)
+        include_native_extras = st.checkbox(
+            "Include extra native fields", value=True,
+            help="Real Product Category, Cost per item, Gift Card status, template "
+                 "suffixes, and per-variant customs/origin fields. None of these are in "
+                 "Shopify's REST product data, so each one needs an extra GraphQL request "
+                 "per batch of products — turn this off for a faster export if you don't "
+                 "need them."
+        )
 
     with col_e2:
         st.markdown("**Export will include:**")
@@ -1057,6 +1144,7 @@ with tab2:
         - ✅ All product images (multiple rows per product)
         - ✅ Whichever metafield columns you pick below
         - ✅ Same column format as your import template
+        - ✅ Extra native fields (category, cost, gift card, customs info) if checked above
         """)
 
     st.markdown("---")
@@ -1122,19 +1210,26 @@ with tab2:
     product_ids       = [p["id"] for p in products]
     export_batch_size = batch_size_for(len(selected_keys)) if selected_keys else 0
     export_batches    = chunk(product_ids, export_batch_size) if selected_keys and product_ids else []
+    extras_batches    = (chunk(product_ids, EXTRAS_FETCH_BATCH_SIZE)
+                         if include_native_extras and product_ids else [])
+    total_batches     = len(export_batches) + len(extras_batches)
 
     if products:
-        plan_cols = st.columns(3)
+        plan_cols = st.columns(4)
         plan_cols[0].metric("Products to export", len(products))
         plan_cols[1].metric(
             f"Metafield requests ({export_batch_size or '—'}/request)", len(export_batches)
         )
         plan_cols[2].metric(
-            "Estimated Time", f"~{format_duration(upfront_estimate_seconds(len(export_batches)))}"
+            f"Extra-field requests ({EXTRAS_FETCH_BATCH_SIZE}/request)",
+            len(extras_batches) if include_native_extras else "off"
+        )
+        plan_cols[3].metric(
+            "Estimated Time", f"~{format_duration(upfront_estimate_seconds(total_batches))}"
         )
         st.caption(
             "The estimate is refined from real throughput once the run starts. "
-            "Selecting fewer metafield columns fetches faster."
+            "Selecting fewer metafield columns, or turning off extra native fields, fetches faster."
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1153,8 +1248,10 @@ with tab2:
 
         elog(f"✅ Using {len(metafield_map)} selected metafield column(s)")
 
-        mf_by_id  = {}
-        run_start = time.time()
+        mf_by_id      = {}
+        extras_by_id  = {}
+        run_start     = time.time()
+        batches_done  = 0
 
         if not selected_keys:
             elog("ℹ️ No metafield columns selected — skipping metafield fetch entirely")
@@ -1164,8 +1261,8 @@ with tab2:
 
             for b, batch_ids in enumerate(export_batches):
                 export_status.markdown(
-                    f"**Sending request {b+1}/{len(export_batches)}**  \n"
-                    + progress_line(time.time() - run_start, b, len(export_batches), noun="Request")
+                    f"**Sending request {batches_done+1}/{total_batches}**  \n"
+                    + progress_line(time.time() - run_start, batches_done, total_batches, noun="Request")
                 )
                 batch_result, batch_error = fetch_metafields_bulk(
                     st.session_state.headers, st.session_state.store_url,
@@ -1178,14 +1275,39 @@ with tab2:
                         mf_by_id[pid] = fetch_metafields(st.session_state.headers, st.session_state.store_url, pid)
                 else:
                     mf_by_id.update(batch_result)
-                export_prog.progress((b + 1) / len(export_batches))
+                batches_done += 1
+                export_prog.progress(batches_done / max(total_batches, 1))
 
-        elog(f"✅ Metafields fetched — building {len(products)} product row(s)...")
+        if not include_native_extras:
+            elog("ℹ️ Extra native fields turned off — skipping that fetch entirely")
+        else:
+            elog(f"📦 Fetching extra native fields for {len(products)} products "
+                 f"in {len(extras_batches)} GraphQL batch(es)...")
+
+            for b, batch_ids in enumerate(extras_batches):
+                export_status.markdown(
+                    f"**Sending request {batches_done+1}/{total_batches}**  \n"
+                    + progress_line(time.time() - run_start, batches_done, total_batches, noun="Request")
+                )
+                batch_result, batch_error = fetch_native_extras_bulk(
+                    st.session_state.headers, st.session_state.store_url, batch_ids,
+                )
+                if batch_error:
+                    elog(f"⚠️ Extra-field batch {b+1}/{len(extras_batches)} failed ({batch_error}) "
+                         f"— these products will export with those columns blank")
+                else:
+                    extras_by_id.update(batch_result)
+                batches_done += 1
+                export_prog.progress(batches_done / max(total_batches, 1))
+
+        elog(f"✅ Data fetched — building {len(products)} product row(s)...")
 
         for i, product in enumerate(products):
             title      = product.get("title","")[:50]
             metafields = mf_by_id.get(product["id"], [])
-            rows       = build_export_rows(product, metafields, metafield_map)
+            rows       = build_export_rows(
+                product, metafields, metafield_map, extras_by_id.get(product["id"])
+            )
             all_rows.extend(rows)
 
             found_keys = {(mf["namespace"], mf["key"]) for mf in metafields}
@@ -1323,7 +1445,7 @@ with tab4:
     bulk_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_file")
 
     if bulk_file:
-        df_bulk = pd.read_csv(bulk_file, encoding="utf-8-sig")
+        df_bulk = read_uploaded_csv(bulk_file)
         df_bulk = df_bulk.loc[:, ~df_bulk.columns.str.startswith("Unnamed")]
 
         required_cols = ["Handle", "Variant SKU", "Metafield namespace",

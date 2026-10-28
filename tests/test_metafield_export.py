@@ -2,9 +2,12 @@ from metafield_export import (
     GRAPHQL_COST_BUDGET,
     METAFIELD_FETCH_BATCH_SIZE,
     PRODUCT_METAFIELDS_FIRST,
+    VARIANTS_FIRST,
     batch_size_for,
+    build_aliased_extras_query,
     build_aliased_metafields_query,
     fetch_metafields_bulk,
+    fetch_native_extras_bulk,
     product_gid,
 )
 
@@ -311,3 +314,150 @@ class TestCostReporting:
 class TestBatchSizeConstant:
     def test_batch_times_first_stays_well_under_the_bucket(self):
         assert METAFIELD_FETCH_BATCH_SIZE * PRODUCT_METAFIELDS_FIRST < 1000
+
+
+def variant_gid(numeric_id):
+    return f"gid://shopify/ProductVariant/{numeric_id}"
+
+
+def extras_variant_node(numeric_id, unit_cost=None, country=None, hs_code=None,
+                        province=None, requires_components=None, show_unit_price=None):
+    return {"node": {
+        "id": variant_gid(numeric_id),
+        "requiresComponents": requires_components,
+        "showUnitPrice": show_unit_price,
+        "inventoryItem": {
+            "unitCost": {"amount": unit_cost} if unit_cost is not None else None,
+            "countryCodeOfOrigin": country,
+            "harmonizedSystemCode": hs_code,
+            "provinceCodeOfOrigin": province,
+        },
+    }}
+
+
+def extras_product_field(category_full_name=None, is_gift_card=None, template_suffix=None,
+                         gift_card_template_suffix=None, requires_selling_plan=None,
+                         combined_listing_role=None, variant_nodes=()):
+    return {
+        "category": {"fullName": category_full_name} if category_full_name is not None else None,
+        "isGiftCard": is_gift_card,
+        "templateSuffix": template_suffix,
+        "giftCardTemplateSuffix": gift_card_template_suffix,
+        "requiresSellingPlan": requires_selling_plan,
+        "combinedListingRole": combined_listing_role,
+        "variants": {"edges": list(variant_nodes)},
+    }
+
+
+def extras_payload_for(*products_by_alias):
+    return {"data": {f"p{i}": p for i, p in enumerate(products_by_alias)}}
+
+
+class TestExtrasQueryShape:
+    def test_aliases_one_product_field_per_id(self):
+        query, _ = build_aliased_extras_query([111, 222])
+        assert "p0: product(id: $id0)" in query
+        assert "p1: product(id: $id1)" in query
+
+    def test_variables_map_each_alias_to_its_product_gid(self):
+        _, variables = build_aliased_extras_query([111, 222])
+        assert variables["id0"] == product_gid(111)
+        assert variables["id1"] == product_gid(222)
+
+    def test_requests_variants_up_to_the_configured_first(self):
+        query, _ = build_aliased_extras_query([111])
+        assert f"variants(first: {VARIANTS_FIRST})" in query
+
+    def test_requests_every_extra_field(self):
+        query, _ = build_aliased_extras_query([111])
+        for field in ("category { fullName }", "isGiftCard", "templateSuffix",
+                      "giftCardTemplateSuffix", "requiresSellingPlan", "combinedListingRole",
+                      "requiresComponents", "showUnitPrice", "unitCost { amount }",
+                      "countryCodeOfOrigin", "harmonizedSystemCode", "provinceCodeOfOrigin"):
+            assert field in query
+
+
+class TestFetchNativeExtrasBulk:
+    def test_empty_product_ids_makes_no_request(self):
+        poster = FakePoster([])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [], http_post=poster)
+        assert result == {}
+        assert error is None
+        assert poster.calls == []
+
+    def test_maps_product_level_extras_back_by_id(self):
+        poster = FakePoster([FakeResponse(payload=extras_payload_for(
+            extras_product_field(category_full_name="Apparel & Accessories > Jewelry > Rings",
+                                 is_gift_card=False, template_suffix="custom",
+                                 gift_card_template_suffix=None,
+                                 requires_selling_plan=False, combined_listing_role=None),
+        ))])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert error is None
+        extras = result[111]
+        assert extras["category_full_name"] == "Apparel & Accessories > Jewelry > Rings"
+        assert extras["is_gift_card"] is False
+        assert extras["template_suffix"] == "custom"
+        assert extras["requires_selling_plan"] is False
+
+    def test_maps_variant_level_extras_keyed_by_numeric_variant_id(self):
+        poster = FakePoster([FakeResponse(payload=extras_payload_for(
+            extras_product_field(variant_nodes=[
+                extras_variant_node(555, unit_cost="12.50", country="IN",
+                                    hs_code="7113", province="MH",
+                                    requires_components=False, show_unit_price=True),
+            ]),
+        ))])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert error is None
+        variant_extras = result[111]["variants"][555]
+        assert variant_extras == {
+            "unit_cost": "12.50", "country_code_of_origin": "IN",
+            "harmonized_system_code": "7113", "province_code_of_origin": "MH",
+            "requires_components": False, "show_unit_price": True,
+        }
+
+    def test_missing_category_does_not_crash(self):
+        poster = FakePoster([FakeResponse(payload=extras_payload_for(
+            extras_product_field(category_full_name=None),
+        ))])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert error is None
+        assert result[111]["category_full_name"] is None
+
+    def test_missing_alias_in_response_does_not_crash(self):
+        poster = FakePoster([FakeResponse(payload={"data": {}})])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert error is None
+        assert result == {}
+
+    def test_http_429_sleeps_three_seconds_then_retries(self):
+        poster = FakePoster([
+            FakeResponse(status_code=429, text="rate limited"),
+            FakeResponse(payload={"data": {}}),
+        ])
+        slept, sleep = make_sleep_spy()
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster, sleep=sleep)
+        assert error is None
+        assert slept == [3]
+
+    def test_non_200_returns_error(self):
+        poster = FakePoster([FakeResponse(status_code=401, text="unauthorized")])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert result == {}
+        assert "HTTP 401" in error
+
+    def test_graphql_error_returns_message(self):
+        poster = FakePoster([FakeResponse(payload={
+            "errors": [{"message": "Access denied for category"}]
+        })])
+        result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
+        assert result == {}
+        assert "Access denied" in error
+
+
+class TestExtrasBatchSizeConstant:
+    def test_batch_times_variants_first_stays_under_the_bucket(self):
+        from metafield_export import EXTRAS_FETCH_BATCH_SIZE
+        assert EXTRAS_FETCH_BATCH_SIZE * VARIANTS_FIRST < GRAPHQL_COST_BUDGET * 2
+        assert EXTRAS_FETCH_BATCH_SIZE >= 1
