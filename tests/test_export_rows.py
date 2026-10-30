@@ -1,7 +1,8 @@
 from app import build_export_rows
 
 
-def variant(sku, option1, option2="", price="0.00", image_id=""):
+def variant(sku, option1, option2="", price="0.00", image_id="", title="", position="",
+           admin_graphql_api_id=""):
     return {
         "id": sku, "sku": sku, "option1": option1, "option2": option2,
         "price": price, "compare_at_price": "", "grams": 10,
@@ -9,6 +10,7 @@ def variant(sku, option1, option2="", price="0.00", image_id=""):
         "inventory_policy": "deny", "fulfillment_service": "manual",
         "requires_shipping": True, "taxable": True, "barcode": "",
         "image_id": image_id, "weight_unit": "g",
+        "title": title, "position": position, "admin_graphql_api_id": admin_graphql_api_id,
     }
 
 
@@ -168,3 +170,92 @@ class TestWithExtras:
         # ...the unmatched one falls back to blank, not the matched variant's values.
         assert rows[1]["Cost per item"] == ""
         assert rows[1]["Variant Country Of Origin"] == ""
+
+
+class TestVariantTitlePositionAndId:
+    """Title, Position and the GID are free on every REST variant payload —
+    they shouldn't need the extras pass at all, unlike the two below them.
+    """
+
+    def test_read_straight_from_rest_with_no_extras_needed(self):
+        p = product([variant("SKU-G-5", "Gold", title="14K Yellow Gold / 0.15CT",
+                             position=2, admin_graphql_api_id="gid://shopify/ProductVariant/999")])
+        rows = build_export_rows(p, [], metafield_map={})
+        assert rows[0]["Variant Title"] == "14K Yellow Gold / 0.15CT"
+        assert rows[0]["Variant Position"] == 2
+        assert rows[0]["Variant ID"] == "gid://shopify/ProductVariant/999"
+
+
+class TestVariantAvailabilityExtras:
+    def test_blank_without_extras(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        rows = build_export_rows(p, [], metafield_map={})
+        assert rows[0]["Variant Available For Sale"] == ""
+        assert rows[0]["Variant Sellable Online Quantity"] == ""
+
+    def test_populated_from_extras(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        extras = {"variants": {"SKU-G-5": {
+            "available_for_sale": True, "sellable_online_quantity": 7,
+        }}}
+        rows = build_export_rows(p, [], metafield_map={}, extras=extras)
+        assert rows[0]["Variant Available For Sale"] == "TRUE"
+        assert rows[0]["Variant Sellable Online Quantity"] == 7
+
+    def test_zero_sellable_quantity_is_not_treated_as_blank(self):
+        # Regression guard: 0 is falsy in Python but a real, meaningful value
+        # here (out of stock), not "unknown" — must not collapse to "".
+        p = product([variant("SKU-G-5", "Gold")])
+        extras = {"variants": {"SKU-G-5": {"sellable_online_quantity": 0}}}
+        rows = build_export_rows(p, [], metafield_map={}, extras=extras)
+        assert rows[0]["Variant Sellable Online Quantity"] == 0
+
+
+class TestVariantOwnedMetafields:
+    """Variant-owned metafields (e.g. custom.product_variant_details) get
+    their own column, populated per-variant from fetch_variant_metafields_bulk
+    — not from the product-level metafields list, and not just on row 0.
+    """
+
+    def test_populated_on_the_matching_variant(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        vmap = {("custom", "product_variant_details"): "Product Variant Details (variant.metafields.custom.product_variant_details)"}
+        vmf_by_id = {"SKU-G-5": [{"namespace": "custom", "key": "product_variant_details", "value": "Diamond Shape: Round"}]}
+        rows = build_export_rows(p, [], metafield_map={},
+                                 variant_metafield_map=vmap, variant_metafields_by_id=vmf_by_id)
+        assert rows[0]["Product Variant Details (variant.metafields.custom.product_variant_details)"] == "Diamond Shape: Round"
+
+    def test_each_variant_gets_its_own_value_not_just_the_first(self):
+        p = product([
+            variant("SKU-G-5", "Gold"),
+            variant("SKU-WG-5", "White Gold"),
+        ])
+        vmap = {("custom", "product_variant_details"): "Details"}
+        vmf_by_id = {
+            "SKU-G-5": [{"namespace": "custom", "key": "product_variant_details", "value": "Gold details"}],
+            "SKU-WG-5": [{"namespace": "custom", "key": "product_variant_details", "value": "White gold details"}],
+        }
+        rows = build_export_rows(p, [], metafield_map={},
+                                 variant_metafield_map=vmap, variant_metafields_by_id=vmf_by_id)
+        assert rows[0]["Details"] == "Gold details"
+        assert rows[1]["Details"] == "White gold details"
+
+    def test_blank_when_not_fetched(self):
+        p = product([variant("SKU-G-5", "Gold")])
+        vmap = {("custom", "product_variant_details"): "Details"}
+        rows = build_export_rows(p, [], metafield_map={}, variant_metafield_map=vmap)
+        assert rows[0]["Details"] == ""
+
+    def test_product_and_variant_definitions_with_the_same_namespace_key_dont_collide(self):
+        # Regression guard: custom.product_variant_details exists as both a
+        # product-owned and a separate variant-owned definition on a live
+        # store — they must populate independently, not overwrite each other.
+        p = product([variant("SKU-G-5", "Gold")])
+        product_map = {("custom", "product_variant_details"): "Product Variant Details (product.metafields.custom.product_variant_details)"}
+        variant_map = {("custom", "product_variant_details"): "Product Variant Details (variant.metafields.custom.product_variant_details)"}
+        product_metafields = [{"namespace": "custom", "key": "product_variant_details", "value": "Product-level text"}]
+        vmf_by_id = {"SKU-G-5": [{"namespace": "custom", "key": "product_variant_details", "value": "Variant-level text"}]}
+        rows = build_export_rows(p, product_metafields, metafield_map=product_map,
+                                 variant_metafield_map=variant_map, variant_metafields_by_id=vmf_by_id)
+        assert rows[0]["Product Variant Details (product.metafields.custom.product_variant_details)"] == "Product-level text"
+        assert rows[0]["Product Variant Details (variant.metafields.custom.product_variant_details)"] == "Variant-level text"

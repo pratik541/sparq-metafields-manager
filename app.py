@@ -23,7 +23,8 @@ from metafield_definitions import DEFINITION_COLUMNS, fetch_metafield_definition
 from native_field_schema import SCHEMA_COLUMNS, fetch_native_field_schema
 from metafield_export import (
     EXTRAS_FETCH_BATCH_SIZE, batch_size_for, build_aliased_metafields_query,
-    fetch_metafields_bulk, fetch_native_extras_bulk,
+    fetch_metafields_bulk, fetch_native_extras_bulk, fetch_variant_metafields_bulk,
+    variant_metafields_batch_size_for,
 )
 from eta import format_duration, progress_line, upfront_estimate_seconds
 
@@ -286,6 +287,10 @@ TEMPLATE_COLS_POST_METAFIELDS = [
     "Combined Listing Role","Variant Country Of Origin",
     "Variant Harmonized System Code","Variant Province Of Origin",
     "Variant Requires Components","Variant Show Unit Price",
+    # Title/Position/ID are free on every REST payload; Available For Sale
+    # and Sellable Online Quantity need the extras pass like the others above.
+    "Variant Title","Variant Position","Variant ID",
+    "Variant Available For Sale","Variant Sellable Online Quantity",
 ]
 
 BATCH_SIZE = 25  # metafieldsSet accepts max 25 per call
@@ -511,24 +516,36 @@ def parse_metafield_columns(df_columns):
 
 
 def metafield_map_from_definitions(defs_rows):
-    """Turn fetched product metafield definitions into a (ns, key) -> CSV column name map.
+    """Turn fetched metafield definitions into a (owner, ns, key) -> CSV column name map.
 
-    Only PRODUCT-owned definitions apply here — this export has one row per
-    product, so variant-level metafields don't fit its columns. Keys already
-    covered by GOOGLE_SHOPPING_KEYS are skipped too — those get their own
-    always-included template column, so keeping them here would just add a
-    second, differently-named column for the same underlying metafield.
+    Both "product" and "variant" owners are included — the export already
+    emits one row per variant (a product's 2nd, 3rd, ... variant gets its own
+    row, product-level fields left blank per Shopify's own export convention),
+    so variant-owned metafields have somewhere to live: that variant's own
+    row, not just the product's first row.
+
+    The owner is part of the key, not just (ns, key), because the same
+    namespace.key pair can legitimately be defined at both levels at once —
+    confirmed on a live store: custom.product_variant_details exists as a
+    "Product Variant Details" definition (owner product) and a separate
+    "Prod Var Details" definition (owner variant). Collapsing to (ns, key)
+    alone would let one silently overwrite the other in this dict.
+
+    Keys already covered by GOOGLE_SHOPPING_KEYS are skipped — those get
+    their own always-included template column, so keeping them here would
+    just add a second, differently-named column for the same metafield.
     """
     google_shopping_pairs = set(GOOGLE_SHOPPING_KEYS.values())
     metafield_map = {}
     for d in defs_rows:
-        if d.get("Owner") != "product":
+        owner = d.get("Owner")
+        if owner not in ("product", "variant"):
             continue
         ns, key = d.get("Metafield namespace", ""), d.get("Metafield Key", "")
         if not ns or not key or (ns, key) in google_shopping_pairs:
             continue
         name = d.get("Name") or key
-        metafield_map[(ns, key)] = f"{name} (product.metafields.{ns}.{key})"
+        metafield_map[(owner, ns, key)] = f"{name} ({owner}.metafields.{ns}.{key})"
     return metafield_map
 
 
@@ -539,16 +556,22 @@ def _bool_or_blank(value):
     return "TRUE" if value else "FALSE"
 
 
-def _variant_fields(variant, extras=None):
+def _variant_fields(variant, extras=None, variant_metafield_map=None, variant_metafields=None):
     """Per-variant columns, shared by the main row and every extra variant row.
 
     extras, if given, is one entry of fetch_native_extras_bulk's per-product
     "variants" dict — fields it doesn't carry (because the extras pass wasn't
     run, or this variant was past VARIANTS_FIRST) fall back to blank.
+
+    variant_metafields, if given, is this specific variant's own list of
+    {"namespace", "key", "value"} dicts from fetch_variant_metafields_bulk —
+    looked up the same way product-level metafields are, just scoped to this
+    one variant instead of the whole product.
     """
     extras = extras or {}
     unit_cost = extras.get("unit_cost")
-    return {
+    vmf_lookup = {(mf["namespace"], mf["key"]): mf["value"] for mf in (variant_metafields or [])}
+    fields = {
         "Option1 Value": variant.get("option1","Default Title"),
         "Option2 Value": variant.get("option2",""),
         "Option3 Value": variant.get("option3",""),
@@ -568,20 +591,44 @@ def _variant_fields(variant, extras=None):
         "Variant Province Of Origin": extras.get("province_code_of_origin") or "",
         "Variant Requires Components": _bool_or_blank(extras.get("requires_components")),
         "Variant Show Unit Price": _bool_or_blank(extras.get("show_unit_price")),
+        # Title, Position and the GID are already free on the REST payload —
+        # no need for the GraphQL extras pass just to get these three.
+        "Variant Title": variant.get("title",""),
+        "Variant Position": variant.get("position",""),
+        "Variant ID": variant.get("admin_graphql_api_id",""),
+        # These two are GraphQL-only — Shopify doesn't compute "can this
+        # specific variant actually be bought right now" for the REST payload.
+        "Variant Available For Sale": _bool_or_blank(extras.get("available_for_sale")),
+        "Variant Sellable Online Quantity": extras.get("sellable_online_quantity")
+            if extras.get("sellable_online_quantity") is not None else "",
     }
+    for (ns, key), col_name in (variant_metafield_map or {}).items():
+        fields[col_name] = vmf_lookup.get((ns, key), "")
+    return fields
 
 
-def build_export_rows(product, metafields, metafield_map=None, extras=None):
+def build_export_rows(product, metafields, metafield_map=None, extras=None,
+                      variant_metafield_map=None, variant_metafields_by_id=None):
     """extras, if given, is fetch_native_extras_bulk's entry for this product —
     native fields the REST products.json payload never carries at all (real
     taxonomy category, gift card status, template suffixes, per-variant
     customs/cost data). Omitted, every one of those columns comes back blank,
     same as before this pass existed.
+
+    variant_metafield_map is (ns, key) -> column name for variant-OWNED
+    metafield definitions (metafield_map is product-owned only — see
+    metafield_map_from_definitions for why the two must stay separate).
+    variant_metafields_by_id maps REST variant id to that variant's own list
+    of {"namespace", "key", "value"} dicts from fetch_variant_metafields_bulk.
+    Each variant's row gets its own values — unlike product-level metafields,
+    which only populate the first/product row, a variant-owned metafield has
+    a real place to live on every variant's row.
     """
     if metafield_map is None:
         metafield_map = METAFIELD_MAP
     extras = extras or {}
     extras_by_variant_id = extras.get("variants") or {}
+    variant_metafields_by_id = variant_metafields_by_id or {}
     mf_lookup = {(mf["namespace"], mf["key"]): mf["value"] for mf in metafields}
     variants  = product.get("variants") or [{}]
     images    = sorted(product.get("images", []), key=lambda x: x.get("position", 99))
@@ -603,7 +650,8 @@ def build_export_rows(product, metafields, metafield_map=None, extras=None):
         "Option1 Name": options[0]["name"] if options else "Title", "Option1 Linked To": "",
         "Option2 Name": options[1]["name"] if len(options) > 1 else "", "Option2 Linked To": "",
         "Option3 Name": options[2]["name"] if len(options) > 2 else "", "Option3 Linked To": "",
-        **_variant_fields(variants[0], extras_by_variant_id.get(variants[0].get("id"))),
+        **_variant_fields(variants[0], extras_by_variant_id.get(variants[0].get("id")),
+                         variant_metafield_map, variant_metafields_by_id.get(variants[0].get("id"))),
         "Unit Price Total Measure": "", "Unit Price Total Measure Unit": "",
         "Unit Price Base Measure": "", "Unit Price Base Measure Unit": "",
         "Image Src": images[0]["src"] if images else "",
@@ -642,7 +690,8 @@ def build_export_rows(product, metafields, metafield_map=None, extras=None):
     for variant in variants[1:]:
         row = {col: "" for col in main.keys()}
         row["Handle"] = product.get("handle","")
-        row.update(_variant_fields(variant, extras_by_variant_id.get(variant.get("id"))))
+        row.update(_variant_fields(variant, extras_by_variant_id.get(variant.get("id")),
+                                   variant_metafield_map, variant_metafields_by_id.get(variant.get("id"))))
         rows.append(row)
 
     for img in images[1:]:
@@ -1189,7 +1238,9 @@ with tab2:
             f"⚠️ Could not load live metafield definitions "
             f"({st.session_state.export_metafield_defs_error}) — using the built-in metafield list."
         )
-        full_metafield_map = METAFIELD_MAP
+        # The hardcoded fallback has no owner info of its own — every entry
+        # in it is a product-level metafield.
+        full_metafield_map = {("product", ns, key): col for (ns, key), col in METAFIELD_MAP.items()}
     else:
         full_metafield_map = metafield_map_from_definitions(st.session_state.export_metafield_defs)
 
@@ -1218,32 +1269,46 @@ with tab2:
     metafield_map  = {k: v for k, v in full_metafield_map.items() if v in selected_metafield_cols}
     metafield_cols = list(metafield_map.values())
 
+    # Split by owner — product- and variant-owned metafields are fetched by
+    # two different GraphQL passes and populate different rows (see
+    # build_export_rows), even though they share one combined column picker.
+    product_metafield_map = {(ns, key): col for (owner, ns, key), col in metafield_map.items() if owner == "product"}
+    variant_metafield_map = {(ns, key): col for (owner, ns, key), col in metafield_map.items() if owner == "variant"}
+
     # Google Shopping columns are always-included template columns (like
     # Handle or Title), not part of the picker, but they're metafields under
     # the hood — so they must always be in the fetch's `keys` filter too, or
     # the GraphQL request will never ask Shopify for them.
-    selected_keys = sorted({f"{ns}.{key}" for (ns, key) in metafield_map.keys()}
+    selected_keys = sorted({f"{ns}.{key}" for (ns, key) in product_metafield_map.keys()}
                           | {f"{ns}.{key}" for (ns, key) in GOOGLE_SHOPPING_KEYS.values()})
+    variant_keys  = sorted({f"{ns}.{key}" for (ns, key) in variant_metafield_map.keys()})
 
     # ── Time estimate — same live-throughput pattern as the update tabs ──
-    product_ids       = [p["id"] for p in products]
-    export_batch_size = batch_size_for(len(selected_keys)) if selected_keys else 0
-    export_batches    = chunk(product_ids, export_batch_size) if selected_keys and product_ids else []
-    extras_batches    = (chunk(product_ids, EXTRAS_FETCH_BATCH_SIZE)
-                         if include_native_extras and product_ids else [])
-    total_batches     = len(export_batches) + len(extras_batches)
+    product_ids          = [p["id"] for p in products]
+    export_batch_size    = batch_size_for(len(selected_keys)) if selected_keys else 0
+    export_batches       = chunk(product_ids, export_batch_size) if selected_keys and product_ids else []
+    extras_batches       = (chunk(product_ids, EXTRAS_FETCH_BATCH_SIZE)
+                            if include_native_extras and product_ids else [])
+    variant_mf_batch_size = variant_metafields_batch_size_for(len(variant_keys)) if variant_keys else 0
+    variant_mf_batches    = (chunk(product_ids, variant_mf_batch_size)
+                             if variant_keys and product_ids else [])
+    total_batches        = len(export_batches) + len(extras_batches) + len(variant_mf_batches)
 
     if products:
-        plan_cols = st.columns(4)
+        plan_cols = st.columns(5)
         plan_cols[0].metric("Products to export", len(products))
         plan_cols[1].metric(
             f"Metafield requests ({export_batch_size or '—'}/request)", len(export_batches)
         )
         plan_cols[2].metric(
+            f"Variant metafield requests ({variant_mf_batch_size or '—'}/request)",
+            len(variant_mf_batches) if variant_keys else "none selected"
+        )
+        plan_cols[3].metric(
             f"Extra-field requests ({EXTRAS_FETCH_BATCH_SIZE}/request)",
             len(extras_batches) if include_native_extras else "off"
         )
-        plan_cols[3].metric(
+        plan_cols[4].metric(
             "Estimated Time", f"~{format_duration(upfront_estimate_seconds(total_batches))}"
         )
         st.caption(
@@ -1265,12 +1330,14 @@ with tab2:
             log_html = "<br>".join(logs[-30:])
             export_log.markdown(f'<div class="log-box">{log_html}</div>', unsafe_allow_html=True)
 
-        elog(f"✅ Using {len(metafield_map)} selected metafield column(s)")
+        elog(f"✅ Using {len(product_metafield_map)} product + "
+             f"{len(variant_metafield_map)} variant metafield column(s)")
 
-        mf_by_id      = {}
-        extras_by_id  = {}
-        run_start     = time.time()
-        batches_done  = 0
+        mf_by_id          = {}
+        extras_by_id      = {}
+        variant_mf_by_id  = {}
+        run_start         = time.time()
+        batches_done      = 0
 
         if not selected_keys:
             elog("ℹ️ No metafield columns selected — skipping metafield fetch entirely")
@@ -1319,18 +1386,42 @@ with tab2:
                 batches_done += 1
                 export_prog.progress(batches_done / max(total_batches, 1))
 
+        if not variant_keys:
+            elog("ℹ️ No variant-level metafield columns selected — skipping that fetch entirely")
+        else:
+            elog(f"📦 Fetching variant metafields for {len(products)} products "
+                 f"in {len(variant_mf_batches)} GraphQL batch(es)...")
+
+            for b, batch_ids in enumerate(variant_mf_batches):
+                export_status.markdown(
+                    f"**Sending request {batches_done+1}/{total_batches}**  \n"
+                    + progress_line(time.time() - run_start, batches_done, total_batches, noun="Request")
+                )
+                batch_result, batch_error = fetch_variant_metafields_bulk(
+                    st.session_state.headers, st.session_state.store_url,
+                    batch_ids, keys=variant_keys,
+                )
+                if batch_error:
+                    elog(f"⚠️ Variant metafield batch {b+1}/{len(variant_mf_batches)} failed "
+                         f"({batch_error}) — these columns will be blank for this batch")
+                else:
+                    variant_mf_by_id.update(batch_result)
+                batches_done += 1
+                export_prog.progress(batches_done / max(total_batches, 1))
+
         elog(f"✅ Data fetched — building {len(products)} product row(s)...")
 
         for i, product in enumerate(products):
             title      = product.get("title","")[:50]
             metafields = mf_by_id.get(product["id"], [])
             rows       = build_export_rows(
-                product, metafields, metafield_map, extras_by_id.get(product["id"])
+                product, metafields, product_metafield_map, extras_by_id.get(product["id"]),
+                variant_metafield_map, variant_mf_by_id,
             )
             all_rows.extend(rows)
 
             found_keys = {(mf["namespace"], mf["key"]) for mf in metafields}
-            for (ns, key) in metafield_map.keys():
+            for (ns, key) in product_metafield_map.keys():
                 if (ns, key) in found_keys:
                     elog(f"  ✅ [{i+1}/{len(products)}] {title} — {ns}.{key}")
 

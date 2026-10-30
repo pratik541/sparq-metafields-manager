@@ -2,13 +2,17 @@ from metafield_export import (
     GRAPHQL_COST_BUDGET,
     METAFIELD_FETCH_BATCH_SIZE,
     PRODUCT_METAFIELDS_FIRST,
+    VARIANT_METAFIELDS_FIRST,
     VARIANTS_FIRST,
     batch_size_for,
     build_aliased_extras_query,
     build_aliased_metafields_query,
+    build_aliased_variant_metafields_query,
     fetch_metafields_bulk,
     fetch_native_extras_bulk,
+    fetch_variant_metafields_bulk,
     product_gid,
+    variant_metafields_batch_size_for,
 )
 
 HEADERS = {"X-Shopify-Access-Token": "tok"}
@@ -321,9 +325,12 @@ def variant_gid(numeric_id):
 
 
 def extras_variant_node(numeric_id, unit_cost=None, country=None, hs_code=None,
-                        province=None, requires_components=None, show_unit_price=None):
+                        province=None, requires_components=None, show_unit_price=None,
+                        available_for_sale=None, sellable_online_quantity=None):
     return {"node": {
         "id": variant_gid(numeric_id),
+        "availableForSale": available_for_sale,
+        "sellableOnlineQuantity": sellable_online_quantity,
         "requiresComponents": requires_components,
         "showUnitPrice": show_unit_price,
         "inventoryItem": {
@@ -373,7 +380,8 @@ class TestExtrasQueryShape:
         for field in ("category { fullName }", "isGiftCard", "templateSuffix",
                       "giftCardTemplateSuffix", "requiresSellingPlan", "combinedListingRole",
                       "requiresComponents", "showUnitPrice", "unitCost { amount }",
-                      "countryCodeOfOrigin", "harmonizedSystemCode", "provinceCodeOfOrigin"):
+                      "countryCodeOfOrigin", "harmonizedSystemCode", "provinceCodeOfOrigin",
+                      "availableForSale", "sellableOnlineQuantity"):
             assert field in query
 
 
@@ -405,7 +413,8 @@ class TestFetchNativeExtrasBulk:
             extras_product_field(variant_nodes=[
                 extras_variant_node(555, unit_cost="12.50", country="IN",
                                     hs_code="7113", province="MH",
-                                    requires_components=False, show_unit_price=True),
+                                    requires_components=False, show_unit_price=True,
+                                    available_for_sale=True, sellable_online_quantity=4),
             ]),
         ))])
         result, error = fetch_native_extras_bulk(HEADERS, STORE, [111], http_post=poster)
@@ -415,6 +424,7 @@ class TestFetchNativeExtrasBulk:
             "unit_cost": "12.50", "country_code_of_origin": "IN",
             "harmonized_system_code": "7113", "province_code_of_origin": "MH",
             "requires_components": False, "show_unit_price": True,
+            "available_for_sale": True, "sellable_online_quantity": 4,
         }
 
     def test_missing_category_does_not_crash(self):
@@ -461,3 +471,118 @@ class TestExtrasBatchSizeConstant:
         from metafield_export import EXTRAS_FETCH_BATCH_SIZE
         assert EXTRAS_FETCH_BATCH_SIZE * VARIANTS_FIRST < GRAPHQL_COST_BUDGET * 2
         assert EXTRAS_FETCH_BATCH_SIZE >= 1
+
+
+def variant_metafield_node(numeric_id, *mf_nodes):
+    return {"node": {
+        "id": variant_gid(numeric_id),
+        "metafields": {"edges": list(mf_nodes)},
+    }}
+
+
+def variant_mf_product_field(*variant_nodes):
+    return {"variants": {"edges": list(variant_nodes)}}
+
+
+def variant_mf_payload_for(*products_by_alias):
+    return {"data": {f"p{i}": p for i, p in enumerate(products_by_alias)}}
+
+
+class TestVariantMetafieldsBatchSizeFor:
+    def test_zero_keys_returns_one(self):
+        assert variant_metafields_batch_size_for(0) == 1
+        assert variant_metafields_batch_size_for(None) == 1
+
+    def test_fewer_keys_allows_a_larger_batch(self):
+        small = variant_metafields_batch_size_for(1)
+        large = variant_metafields_batch_size_for(20)
+        assert small > large
+
+    def test_batch_size_times_cost_stays_under_the_budget(self):
+        for num_keys in (1, 2, 5, 10, 25):
+            size = variant_metafields_batch_size_for(num_keys)
+            assert size * VARIANT_METAFIELDS_FIRST * (num_keys + 2) <= GRAPHQL_COST_BUDGET
+
+    def test_never_returns_less_than_one(self):
+        assert variant_metafields_batch_size_for(10_000) >= 1
+
+
+class TestVariantMetafieldsQueryShape:
+    def test_aliases_one_product_field_per_id(self):
+        query, _ = build_aliased_variant_metafields_query([111, 222], ["custom.a"])
+        assert "p0: product(id: $id0)" in query
+        assert "p1: product(id: $id1)" in query
+
+    def test_requests_variants_up_to_the_configured_first(self):
+        query, _ = build_aliased_variant_metafields_query([111], ["custom.a"])
+        assert f"variants(first: {VARIANT_METAFIELDS_FIRST})" in query
+
+    def test_keys_always_present_no_unfiltered_mode(self):
+        query, variables = build_aliased_variant_metafields_query([111], ["custom.a", "custom.b"])
+        assert "metafields(first: 2, keys: $keys)" in query
+        assert variables["keys"] == ["custom.a", "custom.b"]
+
+    def test_variables_map_each_alias_to_its_product_gid(self):
+        _, variables = build_aliased_variant_metafields_query([111, 222], ["custom.a"])
+        assert variables["id0"] == product_gid(111)
+        assert variables["id1"] == product_gid(222)
+
+
+class TestFetchVariantMetafieldsBulk:
+    def test_empty_product_ids_makes_no_request(self):
+        poster = FakePoster([])
+        result, error = fetch_variant_metafields_bulk(HEADERS, STORE, [], ["custom.a"], http_post=poster)
+        assert result == {}
+        assert error is None
+        assert poster.calls == []
+
+    def test_empty_keys_makes_no_request(self):
+        poster = FakePoster([])
+        result, error = fetch_variant_metafields_bulk(HEADERS, STORE, [111], [], http_post=poster)
+        assert result == {}
+        assert error is None
+        assert poster.calls == []
+
+    def test_maps_metafields_back_to_the_right_variant_id(self):
+        poster = FakePoster([FakeResponse(payload=variant_mf_payload_for(
+            variant_mf_product_field(
+                variant_metafield_node(555, mf_node("custom", "prod_var_details", "Round")),
+            ),
+        ))])
+        result, error = fetch_variant_metafields_bulk(
+            HEADERS, STORE, [111], ["custom.prod_var_details"], http_post=poster
+        )
+        assert error is None
+        assert result == {555: [{"namespace": "custom", "key": "prod_var_details", "value": "Round"}]}
+
+    def test_variant_with_no_matching_metafields_is_absent(self):
+        poster = FakePoster([FakeResponse(payload=variant_mf_payload_for(
+            variant_mf_product_field(
+                variant_metafield_node(555),
+                variant_metafield_node(666, mf_node("custom", "prod_var_details", "Oval")),
+            ),
+        ))])
+        result, error = fetch_variant_metafields_bulk(
+            HEADERS, STORE, [111], ["custom.prod_var_details"], http_post=poster
+        )
+        assert error is None
+        assert 555 not in result
+        assert result[666] == [{"namespace": "custom", "key": "prod_var_details", "value": "Oval"}]
+
+    def test_non_200_returns_error(self):
+        poster = FakePoster([FakeResponse(status_code=401, text="unauthorized")])
+        result, error = fetch_variant_metafields_bulk(HEADERS, STORE, [111], ["custom.a"], http_post=poster)
+        assert result == {}
+        assert "HTTP 401" in error
+
+    def test_http_429_sleeps_three_seconds_then_retries(self):
+        poster = FakePoster([
+            FakeResponse(status_code=429, text="rate limited"),
+            FakeResponse(payload={"data": {}}),
+        ])
+        slept, sleep = make_sleep_spy()
+        result, error = fetch_variant_metafields_bulk(
+            HEADERS, STORE, [111], ["custom.a"], http_post=poster, sleep=sleep
+        )
+        assert error is None
+        assert slept == [3]
