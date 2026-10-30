@@ -303,10 +303,26 @@ mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
 # ─────────────────────────────────────────────────────────
 # API HELPERS
 # ─────────────────────────────────────────────────────────
-def get_access_token(store_url, client_id, client_secret):
+def normalize_store_url(raw):
+    """Strip the mistakes people actually paste into a "store.myshopify.com"
+    field: a protocol prefix, a trailing slash/path, or stray whitespace from
+    whatever the URL was copied out of. Confirmed live: a pasted
+    "https://store.myshopify.com/" here built
+    "https://https://store.myshopify.com//admin/oauth/..." and Shopify's edge
+    returned a generic 400 OAuth error page for it — not a credentials
+    problem at all.
+    """
+    return re.sub(r"^https?://", "", raw.strip()).strip("/")
+
+
+def get_access_token(store_url, client_id, client_secret, http_post=None):
+    post = http_post or requests.post
+    store_url     = normalize_store_url(store_url)
+    client_id     = client_id.strip()
+    client_secret = client_secret.strip()
     url = f"https://{store_url}/admin/oauth/access_token"
     try:
-        resp = requests.post(url, json={
+        resp = post(url, json={
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
@@ -706,7 +722,10 @@ with st.sidebar:
             if token:
                 st.session_state.connected = True
                 st.session_state.token     = token
-                st.session_state.store_url = store_url
+                # get_access_token normalizes the URL (strips protocol/slash);
+                # keep session state in sync so later API calls use the same
+                # clean host this token was actually issued for.
+                st.session_state.store_url = normalize_store_url(store_url)
                 st.session_state.headers   = {
                     "X-Shopify-Access-Token": token,
                     "Content-Type": "application/json"
